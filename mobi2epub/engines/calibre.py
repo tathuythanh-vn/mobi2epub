@@ -70,6 +70,7 @@ class CalibreEngine(BaseEngine):
 
         try:
             cmd = [str(self._binary), str(src), str(temp_path)]
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -77,6 +78,7 @@ class CalibreEngine(BaseEngine):
                 encoding="utf-8",
                 errors="replace",
                 check=False,
+                creationflags=creationflags,
             )
 
             if proc.returncode != 0:

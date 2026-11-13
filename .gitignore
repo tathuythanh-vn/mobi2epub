@@ -8,8 +8,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
+# PyInstaller build artifacts
 build/
 dist/
+*.spec.bak
 
 # Pytest
 .pytest_cache/

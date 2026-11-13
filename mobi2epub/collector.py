@@ -6,7 +6,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Sequence, Union
 
 # Supported input extensions
 SUPPORTED_EXTENSIONS = {".mobi", ".prc", ".azw3", ".azw"}
@@ -30,7 +30,7 @@ def natural_sort_key(path: Path | str) -> list[int | str]:
 
 
 def collect_tasks(
-    input_path: str | Path,
+    input_path: Union[str, Path, Sequence[Union[str, Path]]],
     output_dir: str | Path | None = None,
     recursive: bool = False,
     allowed_extensions: Sequence[str] = (".mobi",),
@@ -38,6 +38,8 @@ def collect_tasks(
     """Collect MOBI files to convert and compute their destination EPUB paths.
 
     Rules:
+      - If input_path is a list of paths:
+          - Multiple files/folders are collected and aggregated.
       - If input_path is a single file:
           - Default output destination is the file's parent directory.
           - If output_dir is specified, destination is output_dir / <filename>.epub.
@@ -47,13 +49,44 @@ def collect_tasks(
           - Output structure mirrors input relative directory structure when output_dir is given.
           - If output_dir is None, defaults to current working directory (maintaining subfolder structure).
     """
-    root = Path(input_path).resolve()
     valid_exts = {ext.lower() for ext in allowed_extensions}
+    out_root = Path(output_dir).resolve() if output_dir is not None else None
 
+    # Handle sequence of inputs (e.g. from GUI file picker)
+    if isinstance(input_path, (list, tuple)):
+        if not input_path:
+            return []
+        all_tasks: list[ConversionTask] = []
+        for item in input_path:
+            item_path = Path(item).resolve()
+            if not item_path.exists():
+                raise FileNotFoundError(f"Input path does not exist: {item_path}")
+            if item_path.is_file():
+                if item_path.suffix.lower() in valid_exts:
+                    dst_dir = out_root if out_root is not None else item_path.parent
+                    dst_path = dst_dir / f"{item_path.stem}.epub"
+                    all_tasks.append(
+                        ConversionTask(
+                            src_path=item_path,
+                            dst_path=dst_path,
+                            rel_path=Path(item_path.name),
+                        )
+                    )
+            elif item_path.is_dir():
+                sub_tasks = collect_tasks(
+                    item_path,
+                    output_dir=out_root,
+                    recursive=recursive,
+                    allowed_extensions=allowed_extensions,
+                )
+                all_tasks.extend(sub_tasks)
+        all_tasks.sort(key=lambda t: natural_sort_key(t.src_path))
+        return all_tasks
+
+    root = Path(input_path).resolve()
     if not root.exists():
         raise FileNotFoundError(f"Input path does not exist: {root}")
 
-    out_root = Path(output_dir).resolve() if output_dir is not None else None
     tasks: list[ConversionTask] = []
 
     if root.is_file():

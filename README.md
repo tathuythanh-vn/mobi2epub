@@ -1,133 +1,114 @@
-# mobi2epub
+# MOBI to EPUB Converter (MobiToEpub)
 
-A fast, robust command-line tool to convert Kindle `.mobi` books into standard `.epub` files.
-
-## Features
-
-- **1:1 Conversion**: One EPUB per input MOBI file. Each book preserves its internal table of contents, metadata, and images.
-- **Pure Python Default**: Uses `KindleUnpack` via the `mobi` package by default—no external dependencies or large software installations required.
-- **Optional Calibre Backend**: Switch to Calibre's `ebook-convert` with `--engine calibre`.
-- **Pre-check Validation**: Inspects MOBI and PalmDOC headers before unpacking, detecting DRM encryption and corrupt files cleanly and early.
-- **Directory Mirroring & Natural Sorting**: Processes single files or entire folders with `--recursive`, naturally sorting numbers (e.g., `book1`, `book2`, `book10`) and mirroring subfolder hierarchies in the destination folder.
-- **Safe & Atomic Writes**: Outputs to temporary files first and renames on completion, ensuring half-written files are never left behind if interrupted.
-- **Progress & Summary Tracking**: Real-time `tqdm` progress bar on `stderr` (auto-hidden for single files or with `--quiet`), followed by a detailed summary report.
-- **Parallel Processing**: Speed up large batch conversions using `--jobs N` with Python's `ProcessPoolExecutor`.
-- **Unicode & Cross-Platform**: Full support for Unicode characters (e.g. Vietnamese titles/filenames), long paths, Windows, macOS, and Linux.
+A fast, robust Kindle `.mobi` to standard `.epub` converter available both as a standalone **Windows GUI application (`MobiToEpub.exe`)** and as a high-performance **CLI tool (`mobi2epub.exe`)**.
 
 ---
 
-## Installation
+## Download & Portable Run
 
-```bash
-# Clone or navigate to the directory
-cd converter
+**`dist/MobiToEpub.exe`** is a standalone, single-file Windows executable (no Python or external dependencies required).
 
-# Install locally in editable mode
-pip install -e .
-```
-
-Or install with [pipx](https://pypa.github.io/pipx/):
-
-```bash
-pipx install .
-```
+### Windows Delivery Note:
+- If Windows SmartScreen shows *"Windows protected your PC"*, click **"More info"** and then **"Run anyway"**.
+- Allow a few seconds for the single-file executable to unpack its runtime on the first launch.
 
 ---
 
-## CLI Usage
+## 1. Graphical User Interface (GUI)
 
-```text
+Launch `dist/MobiToEpub.exe` (or run `python gui_main.py`):
+
+![MobiToEpub GUI](app_icon.ico)
+
+### Features & Layout:
+- **Input Selection**:
+  - **"Add files..."**: Multi-select individual `.mobi`, `.azw3`, `.prc` files.
+  - **"Select folder..."**: Select a folder containing ebooks.
+- **Required Output Folder**:
+  - The **"Convert"** button remains safely disabled until a valid, writable output directory is selected.
+- **Options**:
+  - **Include subfolders**: Recursively scans directories and mirrors the folder structure in the output destination.
+  - **Overwrite existing**: When unchecked, existing EPUBs are safely skipped and reported.
+- **Progress Tracking**:
+  - Determinate progress bar for batches, showing `12 / 50 · book.mobi` and elapsed time.
+  - Switches to smooth indeterminate animation for single-file conversions.
+- **Live Activity Log**:
+  - Color-coded log tagging `[OK]`, `[SKIPPED]`, `[FAILED]`, and `[DRM]` with clear root-cause explanations.
+- **Cancellation**:
+  - **"Cancel"** stops conversion safely after the current file finishes, ensuring no corrupt or half-written EPUBs remain.
+- **Summary & Open Folder**:
+  - Final counts for converted, skipped, and failed books.
+  - **"Open output folder"** button opens the destination directly in Windows File Explorer.
+
+---
+
+## 2. Command-Line Interface (CLI)
+
+Run `dist/mobi2epub.exe` (or `python -m mobi2epub`):
+
+```bash
 mobi2epub <input> [-o OUTPUT_DIR] [--recursive] [--force] [--quiet] [--engine {kindleunpack,calibre}] [--jobs N]
 ```
 
-### Arguments & Options
-
+### Options:
 | Option | Description |
 |---|---|
 | `<input>` | A `.mobi` file or a directory containing `.mobi` files. |
-| `-o, --output` | Destination directory. Default is next to the input file, or current directory for folder input. |
-| `-r, --recursive` | Search subdirectories recursively and mirror the folder structure in the output directory. |
-| `-f, --force` | Overwrite existing EPUB files. Default behavior is to skip them and report. |
+| `-o, --output` | Destination directory (defaults to input file's directory or current working directory). |
+| `-r, --recursive` | Search subdirectories recursively and mirror the folder structure in the output. |
+| `-f, --force` | Overwrite existing EPUB files. Default behavior is to skip them. |
 | `-q, --quiet` | Suppress progress bars and non-essential summary logs. |
-| `--engine` | Engine backend: `kindleunpack` (default) or `calibre`. |
-| `-j, --jobs` | Number of concurrent worker processes for parallel conversion (default: `1`). |
+| `--engine` | Conversion engine backend: `kindleunpack` (default) or `calibre` (optional). |
+| `-j, --jobs` | Number of concurrent workers for parallel batch conversion (CLI only). |
 
----
-
-## Examples
-
-### 1. Convert a single book
+### CLI Examples:
 ```bash
+# Convert a single book
 mobi2epub novel.mobi
-# Creates novel.epub next to novel.mobi
-```
 
-### 2. Convert to a specific output folder
-```bash
-mobi2epub novel.mobi -o ~/Books/
-# Creates ~/Books/novel.epub
-```
+# Convert an entire library folder recursively to a new folder
+mobi2epub C:\KindleBooks -o C:\EpubLibrary --recursive
 
-### 3. Convert an entire folder with subfolders (mirrored structure)
-```bash
-mobi2epub ~/KindleLibrary/ -o ~/EpubLibrary/ --recursive
-```
-If `~/KindleLibrary/` contains:
-```text
-KindleLibrary/
-├── Fantasy/
-│   └── Book1.mobi
-└── SciFi/
-    └── Dune.mobi
-```
-`~/EpubLibrary/` will contain:
-```text
-EpubLibrary/
-├── Fantasy/
-│   └── Book1.epub
-└── SciFi/
-    └── Dune.epub
-```
-
-### 4. Overwrite existing files and speed up with 4 parallel jobs
-```bash
-mobi2epub ~/KindleLibrary/ -o ~/EpubLibrary/ --force --jobs 4
+# Convert with 4 parallel jobs and overwrite existing files
+mobi2epub C:\KindleBooks -o C:\EpubLibrary --force --jobs 4
 ```
 
 ---
 
-## Exit Codes
+## 3. Architecture & Engine
 
-| Code | Meaning |
-|---|---|
-| `0` | All files succeeded (or were skipped without errors). |
-| `1` | One or more files failed conversion (e.g. DRM-protected, corrupt). |
-| `2` | Nothing could run (invalid arguments, input path does not exist, no `.mobi` files found). |
+- **Work/Display Separation (`mobi2epub/runner.py`)**:
+  - Central `run_batch(inputs, out_dir, options, on_event, cancel_event) -> BatchSummary`.
+  - GUI and CLI share the exact same conversion, pre-check, and validation core.
+  - When `jobs == 1` (always in GUI), execution runs entirely in-process with **zero spawned processes**.
+  - Worker thread + thread-safe `queue.Queue` ensures the GUI window never freezes.
+- **Pure Python Engine (KindleUnpack)**:
+  - Bundled directly inside the executable. Unpacks MOBI6 and KF8/MOBI8 containers.
+  - Builds standards-compliant EPUBs with uncompressed `mimetype` first, `META-INF/container.xml`, `content.opf`, `toc.ncx`, and valid XHTML content.
+- **Pre-check & DRM Detection (`mobi2epub/precheck.py`)**:
+  - Reads binary headers at offset to detect corrupt files and DRM-encrypted books early.
+- **Calibre Backend (`mobi2epub/engines/calibre.py`)**:
+  - Loaded lazily only when `--engine calibre` is invoked via CLI.
 
 ---
 
-## Project Structure
+## 4. Building Executables with PyInstaller
 
-```text
-mobi2epub/
-├── __init__.py
-├── __main__.py        # Supports: python -m mobi2epub
-├── cli.py             # argparse, entry point, process orchestration
-├── collector.py       # find .mobi files, natural sort, directory mirroring
-├── precheck.py        # PalmDOC/MOBI header parsing, DRM check, corrupt detection
-├── progress.py        # tqdm progress tracking and summary reporting
-├── validate.py        # EPUB verification (ZIP, mimetype, container.xml, OPF, spine)
-├── engines/
-│   ├── base.py        # Engine interface (BaseEngine, EngineResult)
-│   ├── kindleunpack.py# Pure-Python KindleUnpack backend (default)
-│   └── calibre.py     # Subprocess Calibre ebook-convert backend (optional)
-└── tests/             # Comprehensive pytest suite
+Run the automated build script:
+
+```cmd
+build.bat
 ```
 
+This installs pinned dependencies from `requirements.txt`, runs `PyInstaller mobi2epub.spec`, and outputs:
+- `dist/MobiToEpub.exe` (Windowed GUI, ~12 MB)
+- `dist/mobi2epub.exe` (Console CLI, ~12 MB)
+
 ---
 
-## Running Tests
+## 5. Running Automated Tests
 
 ```bash
 pytest
 ```
+34 automated tests covering pre-check, collector, engines, runner events, GUI smoke initialization, and EPUB validation.

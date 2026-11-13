@@ -1,23 +1,23 @@
-"""Engines package for mobi2epub."""
+"""Engines package for mobi2epub with lazy backend loading."""
 
 from __future__ import annotations
 
-from typing import Dict, Type
-
+from typing import List
 from mobi2epub.engines.base import BaseEngine, EngineResult
-from mobi2epub.engines.calibre import CalibreEngine
-from mobi2epub.engines.kindleunpack import KindleUnpackEngine
 
-ENGINES: dict[str, type[BaseEngine]] = {
-    "kindleunpack": KindleUnpackEngine,
-    "calibre": CalibreEngine,
-}
+AVAILABLE_ENGINES = ["kindleunpack", "calibre"]
+ENGINES = AVAILABLE_ENGINES
 
 
 def get_engine(name: str = "kindleunpack") -> BaseEngine:
-    """Return an instance of the requested engine."""
+    """Return an instance of the requested engine, importing backends lazily."""
     canonical = name.strip().lower()
-    if canonical not in ENGINES:
-        available = ", ".join(ENGINES.keys())
-        raise ValueError(f"Unknown engine '{name}'. Available engines: {available}")
-    return ENGINES[canonical]()
+    if canonical == "kindleunpack":
+        from mobi2epub.engines.kindleunpack import KindleUnpackEngine
+        return KindleUnpackEngine()
+    elif canonical == "calibre":
+        from mobi2epub.engines.calibre import CalibreEngine
+        return CalibreEngine()
+    else:
+        available_str = ", ".join(AVAILABLE_ENGINES)
+        raise ValueError(f"Unknown engine '{name}'. Available engines: {available_str}")

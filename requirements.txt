@@ -1,0 +1,9 @@
+mobi==0.4.1
+beautifulsoup4==4.15.0
+tqdm==4.70.1
+pyinstaller==6.22.3
+pytest==9.2.0
+loguru==0.8.0
+standard-imghdr==3.13.0
+win32-setctime==1.2.1
+soupsieve==4.1
