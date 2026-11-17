@@ -1,0 +1,17 @@
+{
+  "files": [
+    "mobi2epub/__init__.py",
+    "mobi2epub/__main__.py",
+    "mobi2epub/cli.py",
+    "mobi2epub/collector.py",
+    "mobi2epub/engines/__init__.py",
+    "mobi2epub/engines/base.py",
+    "mobi2epub/engines/calibre.py",
+    "mobi2epub/engines/kindleunpack.py",
+    "mobi2epub/gui.py",
+    "mobi2epub/precheck.py",
+    "mobi2epub/progress.py",
+    "mobi2epub/runner.py",
+    "mobi2epub/validate.py"
+  ]
+}

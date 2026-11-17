@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MOBI to EPUB Converter — 100% Client-Side Web App</title>
+  <meta name="description" content="Convert Kindle .mobi, .azw3, .prc, and .azw ebooks to standard .epub right in your browser using Python WebAssembly (Pyodide + KindleUnpack). Zero server uploads." />
+  <link rel="icon" href="./favicon.ico" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <!-- Header -->
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">M→E</div>
+        <div>
+          <h1 class="brand-title">
+            MOBI to EPUB Converter
+            <span class="brand-badge">WebAssembly</span>
+          </h1>
+          <p class="brand-subtitle">Powered by mobi2epub &amp; KindleUnpack in your browser</p>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <div id="enginePill" class="engine-pill loading" role="status" aria-live="polite">
+          <span class="engine-dot"></span>
+          <span id="engineStatusText">Loading Pyodide runtime...</span>
+        </div>
+        <a
+          class="btn btn-sm"
+          href="https://github.com/tathuythanh-vn/mobi2epub/releases/latest/download/MobiToEpub.exe"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Download standalone Windows GUI executable (MobiToEpub.exe)"
+        >
+          ⬇ Windows App (.exe)
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="main-container">
+    <!-- Privacy & Architecture Notice -->
+    <div class="privacy-banner">
+      <div>
+        <strong>100% Private &amp; Client-Side:</strong> Your books never leave your device. Full MOBI binary header pre-check (DRM &amp; corruption detection), KindleUnpack extraction, XHTML conversion, and EPUB validation run locally inside a Web Worker.
+      </div>
+    </div>
+
+    <!-- 1. Input Selection Card -->
+    <section class="card" aria-labelledby="section-input-title">
+      <div class="card-header">
+        <h2 id="section-input-title" class="card-title">1. Input MOBI Files</h2>
+        <button id="btnTrySample" type="button" class="btn btn-sample btn-sm">
+          ✨ Try Sample MOBI (One-Click Demo)
+        </button>
+      </div>
+
+      <div id="dropzone" class="dropzone">
+        <div class="dropzone-clickable">
+          <div class="dropzone-icon" aria-hidden="true">📚</div>
+          <p class="dropzone-title">Drag &amp; drop MOBI files or folders here</p>
+          <p class="dropzone-hint">Supports <code>.mobi</code>, <code>.prc</code>, <code>.azw3</code>, and <code>.azw</code></p>
+        </div>
+
+        <div class="picker-buttons">
+          <button id="btnAddFiles" type="button" class="btn">Add files...</button>
+          <button id="btnSelectFolder" type="button" class="btn">Select folder...</button>
+        </div>
+
+        <input
+          id="fileInput"
+          type="file"
+          multiple
+          accept=".mobi,.prc,.azw3,.azw"
+          class="hidden"
+        />
+        <input
+          id="folderInput"
+          type="file"
+          webkitdirectory
+          directory
+          multiple
+          class="hidden"
+        />
+      </div>
+
+      <!-- Queue Summary & Options -->
+      <div class="queue-bar">
+        <div class="input-summary-box">
+          <div id="inputSummaryText" class="input-summary-text">
+            No files selected — drop .mobi files above or click Add files...
+          </div>
+          <button id="btnClearQueue" type="button" class="btn btn-sm hidden">Clear</button>
+        </div>
+
+        <div class="options-group">
+          <label class="checkbox-label">
+            <input id="chkRecursive" type="checkbox" checked />
+            Include subfolders
+          </label>
+          <label class="checkbox-label">
+            <input id="chkForce" type="checkbox" />
+            Overwrite existing
+          </label>
+        </div>
+
+        <div class="action-buttons">
+          <button id="btnConvert" type="button" class="btn btn-primary" disabled>
+            Convert
+          </button>
+          <button id="btnCancel" type="button" class="btn btn-danger-outline" disabled>
+            Cancel
+          </button>
+        </div>
+      </div>
+
+      <!-- Queued Files List -->
+      <div id="queuedList" class="queued-list hidden"></div>
+    </section>
+
+    <!-- 2. Progress & Status Card -->
+    <section class="card" aria-labelledby="section-progress-title">
+      <div class="card-header">
+        <h2 id="section-progress-title" class="card-title">2. Conversion Progress</h2>
+      </div>
+
+      <div id="progressTrack" class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+        <div id="progressFill" class="progress-fill"></div>
+      </div>
+
+      <div class="status-row">
+        <span id="statusText" class="status-text">Select input files or click "Try Sample MOBI" to begin.</span>
+        <span id="elapsedText" class="elapsed-text"></span>
+      </div>
+    </section>
+
+    <!-- 3. Converted EPUB Downloads Card -->
+    <section class="card" aria-labelledby="section-downloads-title">
+      <div class="card-header">
+        <h2 id="section-downloads-title" class="card-title">
+          3. Converted EPUBs
+          <span id="convertedCountBadge" class="brand-badge">0</span>
+        </h2>
+        <button id="btnDownloadAllZip" type="button" class="btn btn-primary btn-sm" disabled>
+          ⬇ Download All (.zip)
+        </button>
+      </div>
+
+      <div id="downloadsList" class="downloads-list">
+        <div class="empty-downloads">Converted EPUB files will appear here for instant download.</div>
+      </div>
+    </section>
+
+    <!-- 4. Live Activity Log Card -->
+    <section class="card" aria-labelledby="section-log-title">
+      <div class="card-header">
+        <h2 id="section-log-title" class="card-title">4. Activity Log</h2>
+        <button id="btnClearLog" type="button" class="btn btn-sm">Clear Log</button>
+      </div>
+
+      <div id="logBox" class="log-box" role="log" aria-live="polite"></div>
+
+      <div class="summary-bar">
+        <span id="summaryText"></span>
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <div>
+        <strong>MobiToEpub</strong> · Pure-Python KindleUnpack engine with header pre-check &amp; EPUB validation
+      </div>
+      <div class="footer-links">
+        <a
+          href="https://github.com/tathuythanh-vn/mobi2epub/releases/latest/download/MobiToEpub.exe"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Download Windows Desktop GUI (MobiToEpub.exe)
+        </a>
+        <a
+          href="https://github.com/tathuythanh-vn/mobi2epub/releases/latest"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          All Releases
+        </a>
+        <a
+          href="https://github.com/tathuythanh-vn/mobi2epub"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          GitHub Repository
+        </a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="./app.js"></script>
+</body>
+</html>

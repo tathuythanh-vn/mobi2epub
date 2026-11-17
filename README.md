@@ -1,12 +1,26 @@
 # MOBI to EPUB Converter (MobiToEpub)
 
-A fast, robust Kindle `.mobi` to standard `.epub` converter available both as a standalone **Windows GUI application (`MobiToEpub.exe`)** and as a high-performance **CLI tool (`mobi2epub.exe`)**.
+A fast, robust Kindle `.mobi` (`.prc`, `.azw3`, `.azw`) to standard `.epub` converter available as:
+- **Browser Web App (GitHub Pages)**: [https://tathuythanh-vn.github.io/mobi2epub/](https://tathuythanh-vn.github.io/mobi2epub/) — 100% client-side in-browser conversion powered by Pyodide (WebAssembly) with zero server uploads.
+- **Windows GUI Application (`MobiToEpub.exe`)**: [Download Latest Release (`MobiToEpub.exe`)](https://github.com/tathuythanh-vn/mobi2epub/releases/latest/download/MobiToEpub.exe)
+- **Command-Line Interface (`mobi2epub.exe`)**: [Download CLI (`mobi2epub.exe`)](https://github.com/tathuythanh-vn/mobi2epub/releases/latest/download/mobi2epub.exe)
 
 ---
 
-## Download & Portable Run
+## Web App (100% Client-Side in Browser)
 
-**`dist/MobiToEpub.exe`** is a standalone, single-file Windows executable (no Python or external dependencies required).
+Launch the web converter directly at **[https://tathuythanh-vn.github.io/mobi2epub/](https://tathuythanh-vn.github.io/mobi2epub/)**:
+
+- **Zero Server / Complete Privacy**: Runs our Python `mobi2epub` engine (`precheck.py`, `engines/kindleunpack.py`, `validate.py`) inside a browser Web Worker via Pyodide WebAssembly. Your books never leave your device.
+- **Batch & Folder Support**: Drag-and-drop `.mobi`, `.prc`, `.azw3`, or `.azw` files, multi-select files, or select an entire folder.
+- **One-Click Sample Test**: Click **"Try Sample MOBI"** to test the converter immediately in your browser.
+- **Instant Download**: Download individual `.epub` files or batch-download all converted books as a `.zip` archive.
+
+---
+
+## Download & Portable Run (Windows Desktop)
+
+**`dist/MobiToEpub.exe`** is a standalone, single-file Windows executable (no Python or external dependencies required), available on the [GitHub Releases](https://github.com/tathuythanh-vn/mobi2epub/releases/latest) page.
 
 ### Windows Delivery Note:
 - If Windows SmartScreen shows *"Windows protected your PC"*, click **"More info"** and then **"Run anyway"**.
@@ -112,3 +126,17 @@ This installs pinned dependencies from `requirements.txt`, runs `PyInstaller mob
 pytest
 ```
 34 automated tests covering pre-check, collector, engines, runner events, GUI smoke initialization, and EPUB validation.
+
+---
+
+## 6. GitHub Pages Deployment (`docs/`)
+
+The static web application lives in `docs/` (`index.html`, `styles.css`, `app.js`, `worker.js`, `sample.mobi`, and bundled Python modules in `docs/py/`).
+
+- **Automated CI/CD**: `.github/workflows/pages.yml` automatically deploys `docs/` to GitHub Pages on every push to `master`/`main`.
+- **Live URL**: [https://tathuythanh-vn.github.io/mobi2epub/](https://tathuythanh-vn.github.io/mobi2epub/)
+- **Local Preview**:
+  ```bash
+  python -m http.server 8000 --directory docs
+  ```
+  Then open `http://localhost:8000` in your browser.
