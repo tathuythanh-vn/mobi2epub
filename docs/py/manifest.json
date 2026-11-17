@@ -8,6 +8,7 @@
     "mobi2epub/engines/base.py",
     "mobi2epub/engines/calibre.py",
     "mobi2epub/engines/kindleunpack.py",
+    "mobi2epub/epub_tools.py",
     "mobi2epub/gui.py",
     "mobi2epub/precheck.py",
     "mobi2epub/progress.py",

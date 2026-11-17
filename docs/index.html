@@ -1,11 +1,13 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#2563eb" />
   <title>MOBI to EPUB Converter — 100% Client-Side Web App</title>
-  <meta name="description" content="Convert Kindle .mobi, .azw3, .prc, and .azw ebooks to standard .epub right in your browser using Python WebAssembly (Pyodide + KindleUnpack). Zero server uploads." />
+  <meta name="description" content="Convert Kindle .mobi, .azw3, .prc, .azw ebooks and .zip archives to standard .epub right in your browser using Python WebAssembly (Pyodide + KindleUnpack). Zero server uploads." />
   <link rel="icon" href="./favicon.ico" />
+  <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
@@ -16,18 +18,52 @@
         <div class="brand-icon" aria-hidden="true">M→E</div>
         <div>
           <h1 class="brand-title">
-            MOBI to EPUB Converter
+            <span data-i18n="appTitle">MOBI to EPUB Converter</span>
             <span class="brand-badge">WebAssembly</span>
           </h1>
-          <p class="brand-subtitle">Powered by mobi2epub &amp; KindleUnpack in your browser</p>
+          <p class="brand-subtitle" data-i18n="appSubtitle">
+            Powered by mobi2epub &amp; KindleUnpack in your browser
+          </p>
         </div>
       </div>
 
       <div class="header-actions">
         <div id="enginePill" class="engine-pill loading" role="status" aria-live="polite">
           <span class="engine-dot"></span>
-          <span id="engineStatusText">Loading Pyodide runtime...</span>
+          <span id="engineStatusText" data-i18n="engineLoading">Loading Pyodide runtime...</span>
         </div>
+
+        <button
+          id="btnInstallPwa"
+          type="button"
+          class="btn btn-sm btn-sample hidden"
+          title="Install offline web app"
+        >
+          📲 <span data-i18n="installApp">Install App</span>
+        </button>
+
+        <button
+          id="btnLangToggle"
+          type="button"
+          class="btn btn-sm btn-icon-pill"
+          title="Switch language (English / Tiếng Việt)"
+          aria-label="Switch language"
+        >
+          <span id="langLabelEn" class="lang-opt active">EN</span>
+          <span class="lang-sep">|</span>
+          <span id="langLabelVi" class="lang-opt">VI</span>
+        </button>
+
+        <button
+          id="btnThemeToggle"
+          type="button"
+          class="btn btn-sm btn-icon-pill"
+          title="Toggle Dark / Light theme"
+          aria-label="Toggle Dark / Light theme"
+        >
+          <span id="themeIcon" aria-hidden="true">🌙</span>
+        </button>
+
         <a
           class="btn btn-sm"
           href="https://github.com/tathuythanh-vn/mobi2epub/releases/latest/download/MobiToEpub.exe"
@@ -35,7 +71,7 @@
           rel="noopener noreferrer"
           title="Download standalone Windows GUI executable (MobiToEpub.exe)"
         >
-          ⬇ Windows App (.exe)
+          ⬇ <span data-i18n="windowsAppBtn">Windows App (.exe)</span>
         </a>
       </div>
     </div>
@@ -46,36 +82,57 @@
     <!-- Privacy & Architecture Notice -->
     <div class="privacy-banner">
       <div>
-        <strong>100% Private &amp; Client-Side:</strong> Your books never leave your device. Full MOBI binary header pre-check (DRM &amp; corruption detection), KindleUnpack extraction, XHTML conversion, and EPUB validation run locally inside a Web Worker.
+        <strong data-i18n="privacyTitle">100% Private &amp; Client-Side:</strong>
+        <span data-i18n="privacyDesc">
+          Your books never leave your device. Full MOBI binary header pre-check (DRM &amp; corruption detection), KindleUnpack extraction, XHTML conversion, and EPUB validation run locally inside Web Workers.
+        </span>
       </div>
     </div>
 
-    <!-- 1. Input Selection Card -->
+    <!-- 1. Input Selection & Customization Card -->
     <section class="card" aria-labelledby="section-input-title">
       <div class="card-header">
-        <h2 id="section-input-title" class="card-title">1. Input MOBI Files</h2>
-        <button id="btnTrySample" type="button" class="btn btn-sample btn-sm">
-          ✨ Try Sample MOBI (One-Click Demo)
-        </button>
+        <h2 id="section-input-title" class="card-title" data-i18n="sec1Title">1. Input MOBI / ZIP Files</h2>
+        <div class="card-header-actions">
+          <button id="btnTrySample" type="button" class="btn btn-sample btn-sm">
+            ✨ <span data-i18n="trySampleBtn">Try Sample MOBI (One-Click Demo)</span>
+          </button>
+        </div>
       </div>
 
       <div id="dropzone" class="dropzone">
         <div class="dropzone-clickable">
           <div class="dropzone-icon" aria-hidden="true">📚</div>
-          <p class="dropzone-title">Drag &amp; drop MOBI files or folders here</p>
-          <p class="dropzone-hint">Supports <code>.mobi</code>, <code>.prc</code>, <code>.azw3</code>, and <code>.azw</code></p>
+          <p class="dropzone-title" data-i18n="dropzoneTitle">
+            Drag &amp; drop MOBI files, folders, or .zip archives here
+          </p>
+          <p class="dropzone-hint" data-i18n="dropzoneHint">
+            Supports <code>.mobi</code>, <code>.prc</code>, <code>.azw3</code>, <code>.azw</code>, and <code>.zip</code> batches
+          </p>
         </div>
 
         <div class="picker-buttons">
-          <button id="btnAddFiles" type="button" class="btn">Add files...</button>
-          <button id="btnSelectFolder" type="button" class="btn">Select folder...</button>
+          <button id="btnAddFiles" type="button" class="btn">
+            📄 <span data-i18n="addFilesBtn">Add files / .zip...</span>
+          </button>
+          <button id="btnSelectFolder" type="button" class="btn">
+            📁 <span data-i18n="selectFolderBtn">Select folder...</span>
+          </button>
+          <button id="btnChooseOutDir" type="button" class="btn hidden" title="Write converted .epub files directly to a local folder">
+            💾 <span data-i18n="saveToFolderBtn">Save Directly to Folder...</span>
+          </button>
+        </div>
+
+        <div id="outDirBar" class="outdir-bar hidden">
+          <span id="outDirStatus" class="outdir-status"></span>
+          <button id="btnClearOutDir" type="button" class="btn-link-clear" data-i18n="clearOutDir">Reset</button>
         </div>
 
         <input
           id="fileInput"
           type="file"
           multiple
-          accept=".mobi,.prc,.azw3,.azw"
+          accept=".mobi,.prc,.azw3,.azw,.zip"
           class="hidden"
         />
         <input
@@ -88,31 +145,86 @@
         />
       </div>
 
-      <!-- Queue Summary & Options -->
-      <div class="queue-bar">
-        <div class="input-summary-box">
-          <div id="inputSummaryText" class="input-summary-text">
-            No files selected — drop .mobi files above or click Add files...
+      <!-- Conversion Options & Customization Grid -->
+      <div class="options-panel">
+        <div class="options-grid">
+          <div class="option-field">
+            <label for="selFilenameTemplate" class="option-label" data-i18n="lblFilenameTemplate">
+              Output Filename Template
+            </label>
+            <select id="selFilenameTemplate" class="select-input">
+              <option value="{OriginalFilename}.epub" data-i18n="tplOriginal">{OriginalFilename}.epub (Default)</option>
+              <option value="{Title}.epub">{Title}.epub</option>
+              <option value="{Author} - {Title}.epub">{Author} - {Title}.epub</option>
+              <option value="{Title} ({Language}).epub">{Title} ({Language}).epub</option>
+            </select>
           </div>
-          <button id="btnClearQueue" type="button" class="btn btn-sm hidden">Clear</button>
+
+          <div class="option-field">
+            <label for="selCssPreset" class="option-label" data-i18n="lblCssPreset">
+              Typography / CSS Preset
+            </label>
+            <select id="selCssPreset" class="select-input">
+              <option value="original" data-i18n="cssOriginal">Keep Original Styling</option>
+              <option value="serif" data-i18n="cssSerif">Clean Book Serif</option>
+              <option value="sans" data-i18n="cssSans">Modern Sans-Serif</option>
+              <option value="dyslexia" data-i18n="cssDyslexia">Dyslexia-Friendly Spacing</option>
+            </select>
+          </div>
         </div>
 
-        <div class="options-group">
+        <div class="options-toggles-row">
           <label class="checkbox-label">
             <input id="chkRecursive" type="checkbox" checked />
-            Include subfolders
+            <span data-i18n="chkRecursive">Include subfolders</span>
           </label>
+
           <label class="checkbox-label">
             <input id="chkForce" type="checkbox" />
-            Overwrite existing
+            <span data-i18n="chkForce">Overwrite existing</span>
           </label>
+
+          <label class="checkbox-label" title="Split large single-file MOBI6 books at chapter pagebreaks for faster e-reader page turns">
+            <input id="chkAutoSplit" type="checkbox" checked />
+            <span data-i18n="chkAutoSplit">Auto-split large HTML chapters</span>
+          </label>
+
+          <label class="checkbox-label" title="Compress & resize embedded images to shrink EPUB size">
+            <input id="chkImageOptimize" type="checkbox" />
+            <span data-i18n="chkImageOptimize">Optimize images</span>
+          </label>
+
+          <div id="imageOptSubgroup" class="image-opt-subgroup hidden">
+            <label class="checkbox-label">
+              <input id="chkGrayscale" type="checkbox" />
+              <span data-i18n="chkGrayscale">E-Ink Grayscale</span>
+            </label>
+            <label class="inline-num-label">
+              <span data-i18n="lblMaxDim">Max px:</span>
+              <input id="inpImageMaxDim" type="number" class="num-input" value="1200" min="400" max="3200" step="100" />
+            </label>
+            <label class="inline-num-label">
+              <span data-i18n="lblQuality">Quality %:</span>
+              <input id="inpImageQuality" type="number" class="num-input" value="75" min="30" max="95" step="5" />
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Queue Summary & Primary Actions -->
+      <div class="queue-bar">
+        <div class="input-summary-box">
+          <div id="inputSummaryText" class="input-summary-text" data-i18n="noFilesSelected">
+            No files selected — drop .mobi or .zip files above or click Add files...
+          </div>
+          <button id="btnClearQueue" type="button" class="btn btn-sm hidden" data-i18n="clearBtn">Clear</button>
         </div>
 
         <div class="action-buttons">
-          <button id="btnConvert" type="button" class="btn btn-primary" disabled>
+          <button id="btnConvert" type="button" class="btn btn-primary" disabled data-i18n="convertBtn">
             Convert
           </button>
-          <button id="btnCancel" type="button" class="btn btn-danger-outline" disabled>
+          <button id="btnCancel" type="button" class="btn btn-danger-outline" disabled data-i18n="cancelBtn">
             Cancel
           </button>
         </div>
@@ -125,7 +237,10 @@
     <!-- 2. Progress & Status Card -->
     <section class="card" aria-labelledby="section-progress-title">
       <div class="card-header">
-        <h2 id="section-progress-title" class="card-title">2. Conversion Progress</h2>
+        <h2 id="section-progress-title" class="card-title">
+          <span data-i18n="sec2Title">2. Conversion Progress</span>
+          <span id="workerPoolBadge" class="brand-badge">1 Worker</span>
+        </h2>
       </div>
 
       <div id="progressTrack" class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
@@ -133,33 +248,57 @@
       </div>
 
       <div class="status-row">
-        <span id="statusText" class="status-text">Select input files or click "Try Sample MOBI" to begin.</span>
+        <span id="statusText" class="status-text" data-i18n="statusIdle">
+          Select input files or click "Try Sample MOBI" to begin.
+        </span>
         <span id="elapsedText" class="elapsed-text"></span>
       </div>
     </section>
 
-    <!-- 3. Converted EPUB Downloads Card -->
+    <!-- 3. Converted EPUB Downloads Card (Rich Book Cards) -->
     <section class="card" aria-labelledby="section-downloads-title">
       <div class="card-header">
         <h2 id="section-downloads-title" class="card-title">
-          3. Converted EPUBs
+          <span data-i18n="sec3Title">3. Converted EPUBs</span>
           <span id="convertedCountBadge" class="brand-badge">0</span>
         </h2>
         <button id="btnDownloadAllZip" type="button" class="btn btn-primary btn-sm" disabled>
-          ⬇ Download All (.zip)
+          ⬇ <span data-i18n="downloadAllZipBtn">Download All (.zip)</span>
         </button>
       </div>
 
       <div id="downloadsList" class="downloads-list">
-        <div class="empty-downloads">Converted EPUB files will appear here for instant download.</div>
+        <div class="empty-downloads" data-i18n="emptyDownloads">
+          Converted EPUB book cards with cover thumbnails, reader preview, and health reports will appear here.
+        </div>
       </div>
     </section>
 
-    <!-- 4. Live Activity Log Card -->
+    <!-- 4. Recent Conversions (IndexedDB Browser History Cache) -->
+    <section id="historySection" class="card hidden" aria-labelledby="section-history-title">
+      <div class="card-header">
+        <h2 id="section-history-title" class="card-title">
+          <span data-i18n="secHistoryTitle">Recent Conversions (Cached in Browser)</span>
+          <span id="historyCountBadge" class="brand-badge">0</span>
+        </h2>
+        <div class="card-header-actions">
+          <button id="btnToggleHistory" type="button" class="btn btn-sm" data-i18n="hideHistoryBtn">
+            Hide
+          </button>
+          <button id="btnClearHistory" type="button" class="btn btn-danger-outline btn-sm" data-i18n="clearHistoryBtn">
+            Clear History
+          </button>
+        </div>
+      </div>
+
+      <div id="historyList" class="downloads-list"></div>
+    </section>
+
+    <!-- 5. Live Activity Log Card -->
     <section class="card" aria-labelledby="section-log-title">
       <div class="card-header">
-        <h2 id="section-log-title" class="card-title">4. Activity Log</h2>
-        <button id="btnClearLog" type="button" class="btn btn-sm">Clear Log</button>
+        <h2 id="section-log-title" class="card-title" data-i18n="sec4Title">4. Activity Log</h2>
+        <button id="btnClearLog" type="button" class="btn btn-sm" data-i18n="clearLogBtn">Clear Log</button>
       </div>
 
       <div id="logBox" class="log-box" role="log" aria-live="polite"></div>
@@ -170,17 +309,157 @@
     </section>
   </main>
 
+  <!-- Modal 1: Built-in In-Browser EPUB Reader Preview (#6) -->
+  <div id="readerModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="readerTitle">
+    <div class="modal-container modal-reader">
+      <div class="modal-header reader-toolbar">
+        <div class="reader-toolbar-left">
+          <button id="btnToggleReaderSidebar" type="button" class="btn btn-sm" title="Toggle Table of Contents">
+            ☰ <span data-i18n="readerTocBtn">TOC</span>
+          </button>
+          <h3 id="readerTitle" class="modal-title">EPUB Preview</h3>
+        </div>
+
+        <div class="reader-toolbar-center">
+          <button id="btnReaderPrev" type="button" class="btn btn-sm" title="Previous Chapter">
+            ◀ <span data-i18n="readerPrev">Prev</span>
+          </button>
+          <span id="readerChapterIndicator" class="reader-chapter-indicator">1 / 1</span>
+          <button id="btnReaderNext" type="button" class="btn btn-sm" title="Next Chapter">
+            <span data-i18n="readerNext">Next</span> ▶
+          </button>
+        </div>
+
+        <div class="reader-toolbar-right">
+          <button id="btnFontDec" type="button" class="btn btn-sm" title="Decrease font size">A-</button>
+          <span id="readerFontSizeLabel" class="reader-font-label">100%</span>
+          <button id="btnFontInc" type="button" class="btn btn-sm" title="Increase font size">A+</button>
+          <button id="btnCloseReader" type="button" class="btn btn-sm btn-danger-outline" aria-label="Close Reader">✕</button>
+        </div>
+      </div>
+
+      <div class="reader-body">
+        <aside id="readerSidebar" class="reader-sidebar">
+          <div class="reader-sidebar-title" data-i18n="readerChaptersHeading">Chapters / TOC</div>
+          <div id="readerTocList" class="reader-toc-list"></div>
+        </aside>
+        <div class="reader-viewport">
+          <iframe
+            id="readerIframe"
+            class="reader-iframe"
+            sandbox="allow-same-origin"
+            title="EPUB Chapter Content"
+          ></iframe>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal 2: EPUB Structure & Health Report (#7) -->
+  <div id="healthModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="healthModalTitle">
+    <div class="modal-container modal-md">
+      <div class="modal-header">
+        <h3 id="healthModalTitle" class="modal-title" data-i18n="healthModalTitle">EPUB Structure &amp; Health Report</h3>
+        <button id="btnCloseHealth" type="button" class="btn btn-sm" aria-label="Close">✕</button>
+      </div>
+      <div id="healthModalBody" class="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Modal 3: Edit Metadata, Cover & TOC Inspector (#8 & #9) -->
+  <div id="editModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="editModalTitle">
+    <div class="modal-container modal-lg">
+      <div class="modal-header">
+        <h3 id="editModalTitle" class="modal-title" data-i18n="editModalTitle">Edit Book Metadata, Cover &amp; Table of Contents</h3>
+        <button id="btnCloseEdit" type="button" class="btn btn-sm" aria-label="Close">✕</button>
+      </div>
+
+      <div class="modal-body edit-modal-grid">
+        <!-- Left Column: Metadata & Cover -->
+        <div class="edit-col">
+          <h4 class="edit-section-heading" data-i18n="editMetaHeading">Book Metadata (OPF)</h4>
+
+          <div class="form-group">
+            <label for="editTitle" data-i18n="lblTitle">Title</label>
+            <input id="editTitle" type="text" class="text-input" placeholder="Book Title" />
+          </div>
+
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="editAuthor" data-i18n="lblAuthor">Author / Creator</label>
+              <input id="editAuthor" type="text" class="text-input" placeholder="Author Name" />
+            </div>
+            <div class="form-group">
+              <label for="editLanguage" data-i18n="lblLanguage">Language (BCP-47)</label>
+              <input id="editLanguage" type="text" class="text-input" placeholder="en" />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="editPublisher" data-i18n="lblPublisher">Publisher</label>
+            <input id="editPublisher" type="text" class="text-input" placeholder="Publisher" />
+          </div>
+
+          <div class="form-group">
+            <label for="editDescription" data-i18n="lblDescription">Description / Synopsis</label>
+            <textarea id="editDescription" rows="3" class="text-input" placeholder="Book description..."></textarea>
+          </div>
+
+          <h4 class="edit-section-heading" data-i18n="editCoverHeading">Cover Image</h4>
+          <div class="cover-editor-box">
+            <div id="editCoverPreview" class="cover-preview-slot">No Cover</div>
+            <div class="cover-editor-actions">
+              <button id="btnUploadCover" type="button" class="btn btn-sm" data-i18n="uploadCoverBtn">
+                Upload Cover (JPG/PNG)...
+              </button>
+              <button id="btnResetCover" type="button" class="btn btn-sm" data-i18n="resetCoverBtn">
+                Reset Cover
+              </button>
+              <input id="editCoverInput" type="file" accept="image/jpeg,image/png,image/webp" class="hidden" />
+              <p class="cover-hint" data-i18n="coverHint">Replaces or inserts the cover image in the EPUB package.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Column: TOC Inspector & Editor -->
+        <div class="edit-col">
+          <div class="toc-editor-header">
+            <h4 class="edit-section-heading" data-i18n="editTocHeading">Table of Contents (TOC)</h4>
+            <button id="btnAddTocEntry" type="button" class="btn btn-sm" data-i18n="addTocEntryBtn">
+              + Add Entry
+            </button>
+          </div>
+          <p class="toc-editor-hint" data-i18n="tocEditorHint">
+            Rename chapters, reorder entries, or remove empty/duplicate items.
+          </p>
+          <div id="editTocList" class="edit-toc-list"></div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <span id="editSaveStatus" class="edit-save-status"></span>
+        <div class="modal-footer-btns">
+          <button id="btnCancelEdit" type="button" class="btn" data-i18n="cancelBtn">Cancel</button>
+          <button id="btnSaveEdit" type="button" class="btn btn-primary" data-i18n="saveChangesBtn">
+            Save &amp; Update EPUB
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Footer -->
   <footer class="site-footer">
     <div class="footer-inner">
       <div>
-        <strong>MobiToEpub</strong> · Pure-Python KindleUnpack engine with header pre-check &amp; EPUB validation
+        <strong>MobiToEpub</strong> · <span data-i18n="footerTagline">Pure-Python KindleUnpack engine with header pre-check &amp; EPUB validation</span>
       </div>
       <div class="footer-links">
         <a
           href="https://github.com/tathuythanh-vn/mobi2epub/releases/latest/download/MobiToEpub.exe"
           target="_blank"
           rel="noopener noreferrer"
+          data-i18n="footerWinGui"
         >
           Download Windows Desktop GUI (MobiToEpub.exe)
         </a>
@@ -188,6 +467,7 @@
           href="https://github.com/tathuythanh-vn/mobi2epub/releases/latest"
           target="_blank"
           rel="noopener noreferrer"
+          data-i18n="footerReleases"
         >
           All Releases
         </a>
@@ -195,6 +475,7 @@
           href="https://github.com/tathuythanh-vn/mobi2epub"
           target="_blank"
           rel="noopener noreferrer"
+          data-i18n="footerRepo"
         >
           GitHub Repository
         </a>

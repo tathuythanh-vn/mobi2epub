@@ -1,0 +1,31 @@
+{
+  "name": "MobiToEpub Converter",
+  "short_name": "MobiToEpub",
+  "description": "Fast, 100% client-side Kindle MOBI, AZW3, PRC & AZW to standard EPUB converter running in your browser via WebAssembly.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#2e7d32",
+  "orientation": "any",
+  "categories": ["books", "utilities", "productivity"],
+  "icons": [
+    {
+      "src": "./favicon.ico",
+      "sizes": "16x16 32x32 48x48",
+      "type": "image/x-icon"
+    },
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
