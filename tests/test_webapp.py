@@ -77,6 +77,9 @@ def test_bundle_zip_and_manifest_integrity():
             assert rel_file in zip_names, f"{rel_file} listed in manifest.json but missing from bundle.zip"
             disk_copy = DOCS_DIR / "py" / rel_file
             assert disk_copy.exists(), f"docs/py/{rel_file} missing on disk"
+            assert zf.read(rel_file) == disk_copy.read_bytes(), (
+                f"docs/py/bundle.zip entry {rel_file} is out of sync with docs/py/{rel_file}"
+            )
 
 
 def test_pwa_manifest_and_icons():
@@ -297,3 +300,147 @@ def test_isolated_bundle_conversion_and_features(tmp_path: Path):
     assert extracted_items[0]["fileName"] == "sample_mobi6.mobi"
     assert extracted_items[0]["relPath"] == "Fantasy/sample_mobi6.mobi"
     assert Path(extracted_items[0]["diskPath"]).exists()
+
+
+def test_process_epub_features_omits_chapters_preview_by_default(tmp_path: Path):
+    """Regression test: process_epub_features must omit chaptersPreview by default (include_preview=False)
+    so _finalize_job's json.dumps never hits MemoryError on image-heavy books.
+    """
+    epub_tools = _load_bundle_module(tmp_path, "mobi2epub/epub_tools.py", "mobi2epub.epub_tools")
+    from mobi2epub.engines.kindleunpack import KindleUnpackEngine
+
+    sample_mobi = FIXTURES_DIR / "sample_mobi6.mobi"
+    epub_path = tmp_path / "alice_default_preview.epub"
+    conv = KindleUnpackEngine().convert(sample_mobi, epub_path)
+    assert conv.success and epub_path.exists()
+
+    # Default call (as used in _finalize_job during convert_one)
+    report = epub_tools.process_epub_features(epub_path)
+    assert report["chaptersPreview"] == []
+    assert report["chapters"] == []
+    assert "Alice" in (report["title"] or "")
+    assert isinstance(report["toc"], list) and len(report["toc"]) >= 1
+    assert report["healthReport"]["isValid"] is True
+
+    # Explicit include_preview=True populates chaptersPreview
+    report_with_preview = epub_tools.process_epub_features(epub_path, include_preview=True)
+    assert len(report_with_preview["chaptersPreview"]) >= 1
+
+    # Ensure default JSON serialization is much smaller than include_preview=True
+    serialized = json.dumps(report)
+    serialized_with_preview = json.dumps(report_with_preview)
+    assert len(serialized) < 100 * 1024
+    assert len(serialized) < len(serialized_with_preview) // 5
+
+
+def test_process_epub_features_zero_rewrite_fast_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Regression test: when no modifications (css_preset='original', no overrides, no split needed)
+    are requested, process_epub_features must NOT rewrite the .epub file on disk, while still
+    accurately extracting title, coverDataUrl, toc, and healthReport.
+    """
+    epub_tools = _load_bundle_module(tmp_path, "mobi2epub/epub_tools.py", "mobi2epub.epub_tools")
+    from mobi2epub.engines.kindleunpack import KindleUnpackEngine
+
+    sample_mobi = FIXTURES_DIR / "sample_mobi6.mobi"
+    epub_path = tmp_path / "alice_fastpath.epub"
+    conv = KindleUnpackEngine().convert(sample_mobi, epub_path)
+    assert conv.success and epub_path.exists()
+
+    # Inject a cover image once so we can verify coverDataUrl extraction on the subsequent fast-path call
+    cover_bytes = (DOCS_DIR / "icon-192.png").read_bytes()
+    assert epub_tools.update_epub_metadata_and_cover(
+        epub_path,
+        cover_override={"bytes": cover_bytes, "mime": "image/png"},
+    ) is True
+
+    bytes_before = epub_path.read_bytes()
+
+    # Guard against any archive rewrite during the fast-path call
+    def _forbid_archive_update(*args, **kwargs):
+        raise AssertionError("_update_epub_archive should not be called on the zero-rewrite fast path")
+
+    monkeypatch.setattr(epub_tools, "_update_epub_archive", _forbid_archive_update)
+
+    report = epub_tools.process_epub_features(
+        epub_path,
+        options={
+            "cssPreset": "original",
+            "autoSplitChapters": False,
+            "metadataOverride": None,
+            "coverFsInfo": None,
+            "tocOverride": None,
+        },
+        include_preview=False,
+    )
+
+    assert epub_path.read_bytes() == bytes_before
+    assert "Alice" in (report["title"] or "")
+    assert report["coverDataUrl"] is not None
+    assert report["coverDataUrl"].startswith("data:image/png;base64,")
+    assert isinstance(report["toc"], list) and len(report["toc"]) >= 1
+    assert report["healthReport"]["isValid"] is True
+    assert report["healthReport"]["spineCount"] >= 1
+    assert report["chaptersPreview"] == []
+
+
+def test_read_epub_preview_caps_inlined_image_data(tmp_path: Path):
+    """Regression test: read_epub_preview must cap per-image and cumulative Base64 image data
+    so an image-heavy manga EPUB never produces an unbounded JSON payload.
+    """
+    epub_tools = _load_bundle_module(tmp_path, "mobi2epub/epub_tools.py", "mobi2epub.epub_tools")
+    from mobi2epub.engines.kindleunpack import KindleUnpackEngine
+
+    sample_mobi = FIXTURES_DIR / "sample_mobi6.mobi"
+    epub_path = tmp_path / "manga_heavy.epub"
+    conv = KindleUnpackEngine().convert(sample_mobi, epub_path)
+    assert conv.success and epub_path.exists()
+
+    # Inject 6 synthetic page images (50 KB each = 300 KB raw, ~400 KB base64) and a 200 KB oversized image
+    img_tags = []
+    replacements = {}
+    png_header = (DOCS_DIR / "icon-192.png").read_bytes()
+
+    for i in range(1, 7):
+        arc_name = f"Images/page_{i:02d}.png"
+        # Pad deterministic bytes to 50 KB per image
+        payload = png_header + (b"\x00" * max(0, 50 * 1024 - len(png_header)))
+        replacements[arc_name] = payload
+        img_tags.append(f'<p><img src="{arc_name}" alt="Page {i}"/></p>')
+
+    oversized_arc = "Images/giant_spread.png"
+    replacements[oversized_arc] = png_header + (b"\x00" * (200 * 1024))
+    img_tags.append(f'<p><img src="{oversized_arc}" alt="Giant Spread"/></p>')
+
+    with zipfile.ZipFile(epub_path, "r") as zf:
+        orig_xhtml = zf.read("book.xhtml").decode("utf-8", errors="replace")
+
+    heavy_xhtml = orig_xhtml.replace("</body>", "".join(img_tags) + "</body>")
+    replacements["book.xhtml"] = heavy_xhtml.encode("utf-8")
+    assert epub_tools.replace_epub_files(epub_path, replacements) is True
+
+    # Set tight caps: 100 KB max single image (so 200 KB giant_spread is skipped)
+    # and 180 KB max cumulative base64 bytes (so only ~2 of the 50 KB images are inlined)
+    max_single = 100 * 1024
+    max_total = 180 * 1024
+    preview_rep = epub_tools.read_epub_preview(
+        epub_path,
+        max_total_image_bytes=max_total,
+        max_single_image_bytes=max_single,
+    )
+
+    chapters = preview_rep["chaptersPreview"]
+    assert len(chapters) >= 1
+    combined_html = "\n".join(ch["html"] for ch in chapters)
+
+    inlined_data_urls = re.findall(r'src=["\'](data:image/[^"\']+)["\']', combined_html)
+    total_inlined_chars = sum(len(url) for url in inlined_data_urls)
+
+    assert len(inlined_data_urls) >= 1, "At least the first image within budget should be inlined"
+    assert len(inlined_data_urls) <= 3, "Images exceeding the cumulative budget or single-image cap must be omitted"
+    assert total_inlined_chars <= max_total
+
+    # Verify JSON payload of chaptersPreview is strictly bounded well below raw image total (500 KB)
+    preview_rep.pop("chapters", None)
+    payload_json = json.dumps(preview_rep)
+    assert len(payload_json) < max_total + 350 * 1024
+

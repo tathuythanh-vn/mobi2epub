@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 import zipfile
@@ -15,11 +16,37 @@ from mobi2epub.engines.base import BaseEngine, EngineResult
 from mobi2epub.precheck import check_mobi_file
 from mobi2epub.validate import validate_epub
 
+MAX_BS4_HTML_BYTES = 5 * 1024 * 1024
+
 
 def convert_mobi7_html_to_xhtml(html_path: Path, xhtml_path: Path) -> None:
     """Convert MOBI7 book.html into standards-compliant XHTML."""
     with open(html_path, "r", encoding="utf-8", errors="replace") as f:
         content = f.read()
+
+    xml_decl = '<?xml version="1.0" encoding="utf-8"?>\n'
+    doc_type = '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n'
+
+    # Fast regex path for huge (>5 MB) HTML files to avoid large DOM tree allocation in WASM
+    if len(content) > MAX_BS4_HTML_BYTES:
+        cleaned = re.sub(r"<guide\b[^>]*>.*?</guide>", "", content, flags=re.IGNORECASE | re.DOTALL)
+        cleaned = re.sub(
+            r"<mbp:pagebreak\b[^>]*/?>(\s*</mbp:pagebreak>)?",
+            '<div class="mbp_pagebreak" style="page-break-after: always;"></div>',
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if 'xmlns="http://www.w3.org/1999/xhtml"' not in cleaned[:1024]:
+            cleaned = re.sub(
+                r"<html\b",
+                '<html xmlns="http://www.w3.org/1999/xhtml"',
+                cleaned,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        with open(xhtml_path, "w", encoding="utf-8") as f:
+            f.write(xml_decl + doc_type + cleaned)
+        return
 
     soup = BeautifulSoup(content, "html.parser")
 
@@ -38,8 +65,6 @@ def convert_mobi7_html_to_xhtml(html_path: Path, xhtml_path: Path) -> None:
         if "xml:lang" not in soup.html.attrs and "lang" in soup.html.attrs:
             soup.html["xml:lang"] = soup.html["lang"]
 
-    xml_decl = '<?xml version="1.0" encoding="utf-8"?>\n'
-    doc_type = '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n'
     xhtml_content = xml_decl + doc_type + soup.decode(formatter="minimal")
 
     with open(xhtml_path, "w", encoding="utf-8") as f:
@@ -56,6 +81,11 @@ def package_mobi7_as_epub(mobi7_dir: Path, out_epub_path: Path) -> None:
 
     if html_path.exists():
         convert_mobi7_html_to_xhtml(html_path, xhtml_path)
+        if xhtml_path.exists():
+            try:
+                html_path.unlink()
+            except OSError:
+                pass
 
     # Read and adjust OPF to reference book.xhtml and correct media types
     if opf_path.exists():
@@ -63,11 +93,28 @@ def package_mobi7_as_epub(mobi7_dir: Path, out_epub_path: Path) -> None:
             opf_text = f.read()
 
         # Update book.html to book.xhtml and media-type
-        opf_text = opf_text.replace('href="book.html"', 'href="book.xhtml"')
-        opf_text = opf_text.replace('media-type="text/html"', 'media-type="application/xhtml+xml"')
+        opf_text = (
+            opf_text.replace('href="book.html"', 'href="book.xhtml"')
+            .replace("href='book.html'", "href='book.xhtml'")
+            .replace("book.html#", "book.xhtml#")
+            .replace('media-type="text/html"', 'media-type="application/xhtml+xml"')
+        )
 
         with open(opf_path, "w", encoding="utf-8") as f:
             f.write(opf_text)
+
+    # Normalize toc.ncx links to book.xhtml during initial packaging to avoid re-packing later
+    if ncx_path.exists() and xhtml_path.exists():
+        with open(ncx_path, "r", encoding="utf-8", errors="replace") as f:
+            ncx_text = f.read()
+        if "book.html" in ncx_text:
+            ncx_text = (
+                ncx_text.replace('src="book.html"', 'src="book.xhtml"')
+                .replace("src='book.html'", "src='book.xhtml'")
+                .replace("book.html#", "book.xhtml#")
+            )
+            with open(ncx_path, "w", encoding="utf-8") as f:
+                f.write(ncx_text)
 
     # Write container.xml
     container_xml = (
@@ -100,14 +147,26 @@ def package_mobi7_as_epub(mobi7_dir: Path, out_epub_path: Path) -> None:
         # 5. XHTML file
         if xhtml_path.exists():
             zf.write(xhtml_path, "book.xhtml", compress_type=zipfile.ZIP_DEFLATED)
+            try:
+                xhtml_path.unlink()
+            except OSError:
+                pass
         elif html_path.exists():
             zf.write(html_path, "book.html", compress_type=zipfile.ZIP_DEFLATED)
+            try:
+                html_path.unlink()
+            except OSError:
+                pass
 
-        # 6. Images
+        # 6. Images (unlink each unpacked image after adding to ZIP to minimize peak MEMFS usage)
         if images_dir.is_dir():
-            for img_file in images_dir.iterdir():
+            for img_file in sorted(images_dir.iterdir()):
                 if img_file.is_file():
                     zf.write(img_file, f"Images/{img_file.name}", compress_type=zipfile.ZIP_DEFLATED)
+                    try:
+                        img_file.unlink()
+                    except OSError:
+                        pass
 
 
 class KindleUnpackEngine(BaseEngine):
@@ -185,9 +244,8 @@ class KindleUnpackEngine(BaseEngine):
 
             extracted = Path(extracted_path)
             if extracted.suffix.lower() == ".epub":
-                # KF8 produced a ready EPUB file
-                # Copy/move to temp_dst_path
-                shutil.copyfile(extracted, temp_dst_path)
+                # KF8 produced a ready EPUB file — move instead of copying to avoid doubling peak disk/MEMFS usage
+                shutil.move(str(extracted), str(temp_dst_path))
             elif extracted.suffix.lower() in (".html", ".htm") or (Path(temp_dir_to_clean) / "mobi7").is_dir():
                 # MOBI7 unpack
                 mobi7_dir = Path(temp_dir_to_clean) / "mobi7"
@@ -202,6 +260,11 @@ class KindleUnpackEngine(BaseEngine):
                     error_type="unsupported_format",
                     error_message=f"Unsupported unpack output format: {extracted.name}",
                 )
+
+            # Free unpacked temp_dir_to_clean immediately before validation
+            if temp_dir_to_clean and os.path.exists(temp_dir_to_clean):
+                shutil.rmtree(temp_dir_to_clean, ignore_errors=True)
+                temp_dir_to_clean = None
 
             # Validate generated EPUB
             val = validate_epub(temp_dst_path)

@@ -1,4 +1,4 @@
-const SHELL_CACHE = "mobi2epub-shell-v2";
+const SHELL_CACHE = "mobi2epub-shell-v3";
 const PYODIDE_CACHE = "mobi2epub-pyodide-v1";
 
 const APP_SHELL_ASSETS = [

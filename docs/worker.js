@@ -28,6 +28,63 @@ function toUint8Array(input) {
   return null;
 }
 
+/**
+ * Read a file from Pyodide MEMFS as a standalone Uint8Array and immediately unlink it
+ * from MEMFS so the file is never duplicated across MEMFS and multiple JS ArrayBuffers.
+ */
+function readAndUnlinkFsFile(py, filePath) {
+  const raw = py.FS.readFile(filePath);
+  try {
+    py.FS.unlink(filePath);
+  } catch (_) {
+    // Ignore unlink error
+  }
+  if (raw.byteOffset === 0 && raw.byteLength === raw.buffer.byteLength) {
+    return raw;
+  }
+  const copiedBuf = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+  return new Uint8Array(copiedBuf);
+}
+
+/**
+ * Clean up job workDir, any stray /tmp/mobiex* or /tmp/epub_* folders, temporary Python globals,
+ * and run Python garbage collection (`gc.collect()`) after every worker job.
+ */
+async function cleanupWorkerJob(py, workDir, globalNames = []) {
+  try {
+    for (const name of globalNames) {
+      try {
+        py.globals.delete(name);
+      } catch (_) {
+        // Ignore
+      }
+    }
+    py.globals.set("_cleanup_target_dir", workDir || "");
+    await py.runPythonAsync(`
+import gc
+import os
+import shutil
+
+if _cleanup_target_dir and os.path.exists(_cleanup_target_dir):
+    shutil.rmtree(_cleanup_target_dir, ignore_errors=True)
+
+if os.path.isdir("/tmp"):
+    for _entry in os.listdir("/tmp"):
+        if _entry.startswith(("mobiex", "epub_")):
+            shutil.rmtree(os.path.join("/tmp", _entry), ignore_errors=True)
+
+gc.collect()
+`);
+    try {
+      py.globals.delete("_cleanup_target_dir");
+    } catch (_) {
+      // Ignore
+    }
+  } catch (_) {
+    // Ignore cleanup errors
+  }
+}
+
 async function loadBundledPythonModules(py) {
   const pkgRoot = "/home/pyodide/pkgs";
   py.FS.mkdirTree(pkgRoot);
@@ -175,6 +232,7 @@ json.dumps(imgs)
         continue;
       }
 
+      let keptModified = false;
       try {
         const blob = new Blob([origBytes], { type: item.mime || "image/jpeg" });
         const bmp = await createImageBitmap(blob);
@@ -232,9 +290,18 @@ json.dumps(imgs)
         if (grayscale || needsResize || outUint8.byteLength < origBytes.byteLength) {
           py.FS.writeFile(diskPath, outUint8);
           modifiedArcs.push(item.arcName);
+          keptModified = true;
         }
       } catch (_) {
         // Skip individual image if decoding fails
+      }
+
+      if (!keptModified) {
+        try {
+          py.FS.unlink(diskPath);
+        } catch (_) {
+          // Ignore unlink error
+        }
       }
     }
 
@@ -251,21 +318,18 @@ for arc in arcs:
     p = Path(_imgopt_dir) / arc
     if p.exists():
         replacements[arc] = p.read_bytes()
+        try:
+            p.unlink()
+        except OSError:
+            pass
 replace_epub_files(_imgopt_epub, replacements)
+del replacements
 `);
       return true;
     }
     return false;
   } finally {
-    try {
-      py.globals.set("_imgopt_clean", extractDir);
-      await py.runPythonAsync(`
-import shutil
-shutil.rmtree(_imgopt_clean, ignore_errors=True)
-`);
-    } catch (_) {
-      // Ignore cleanup error
-    }
+    await cleanupWorkerJob(py, extractDir, ["_imgopt_epub", "_imgopt_dir", "_imgopt_modified"]);
   }
 }
 
@@ -320,6 +384,12 @@ async function handleConvert(msg) {
     const originalSize = inputBytes.byteLength;
     py.FS.writeFile(srcPath, inputBytes);
 
+    // Drop JS references to input buffer immediately after writing to MEMFS
+    msg.bytes = null;
+    msg.data = null;
+    msg.mobiBytes = null;
+    msg.buffer = null;
+
     const coverFsInfo = prepareCoverOverrideInFs(py, workDir, coverOverride);
 
     py.globals.set("_job_src", srcPath);
@@ -340,20 +410,18 @@ import json
 from pathlib import Path
 from mobi2epub.precheck import check_mobi_file
 from mobi2epub.engines.kindleunpack import KindleUnpackEngine
-from mobi2epub.epub_tools import (
-    normalize_epub_ncx_links,
-    split_epub_chapters,
-    inject_custom_css,
-    update_epub_metadata_and_cover,
-)
+from mobi2epub.epub_tools import normalize_epub_ncx_links
 
-def _run_step1(src_str, dst_str, opts_str):
+def _run_step1(src_str, dst_str):
     src = Path(src_str)
     dst = Path(dst_str)
-    opts = json.loads(opts_str)
 
     pre = check_mobi_file(src)
     if not pre.is_valid:
+        try:
+            src.unlink(missing_ok=True)
+        except OSError:
+            pass
         return json.dumps({
             "success": False,
             "error_type": "corrupt",
@@ -363,6 +431,10 @@ def _run_step1(src_str, dst_str, opts_str):
         })
 
     if pre.is_drm:
+        try:
+            src.unlink(missing_ok=True)
+        except OSError:
+            pass
         return json.dumps({
             "success": False,
             "error_type": "drm",
@@ -373,6 +445,13 @@ def _run_step1(src_str, dst_str, opts_str):
 
     engine = KindleUnpackEngine()
     res = engine.convert(src, dst)
+
+    # Immediately unlink input .mobi from MEMFS once extraction/conversion finishes
+    try:
+        src.unlink(missing_ok=True)
+    except OSError:
+        pass
+
     if not res.success:
         return json.dumps({
             "success": False,
@@ -384,39 +463,13 @@ def _run_step1(src_str, dst_str, opts_str):
 
     normalize_epub_ncx_links(dst)
 
-    if opts.get("autoSplitChapters"):
-        split_epub_chapters(dst)
-
-    css_preset = opts.get("cssPreset")
-    if css_preset and css_preset != "original":
-        inject_custom_css(dst, css_preset)
-
-    meta_ov = opts.get("metadataOverride")
-    toc_ov = opts.get("tocOverride")
-    cover_info = opts.get("coverFsInfo")
-    cover_ov = None
-    if cover_info:
-        if cover_info.get("diskPath"):
-            cover_ov = {
-                "bytes": Path(cover_info["diskPath"]).read_bytes(),
-                "mime": cover_info.get("mime") or "image/jpeg",
-            }
-        elif cover_info.get("dataUrl"):
-            cover_ov = {
-                "dataUrl": cover_info["dataUrl"],
-                "mime": cover_info.get("mime") or "image/jpeg",
-            }
-
-    if meta_ov or cover_ov or toc_ov is not None:
-        update_epub_metadata_and_cover(dst, meta_ov, cover_ov, toc_ov)
-
     return json.dumps({
         "success": True,
         "pre_title": pre.title,
         "pre_version": pre.version,
     })
 
-_run_step1(_job_src, _job_dst, _job_opts_json)
+_run_step1(_job_src, _job_dst)
 `);
 
     const step1 = JSON.parse(step1Json);
@@ -436,32 +489,32 @@ _run_step1(_job_src, _job_dst, _job_opts_json)
       return;
     }
 
-    // Optional Feature #13: OffscreenCanvas image optimization
-    if (imageOptimize && imageOptimize.enabled) {
-      await optimizeEpubImagesInWorker(py, dstPath, imageOptimize);
-    }
-
-    // Final validation and full EPUB report (metadata, coverDataUrl, healthReport, toc, chaptersPreview)
+    // Apply optional features & extract lightweight report (include_preview=False, zero-rewrite fast path)
     py.globals.set("_job_dst", dstPath);
     const reportJson = await py.runPythonAsync(`
 import json
 from pathlib import Path
 from mobi2epub.validate import validate_epub
-from mobi2epub.epub_tools import build_full_epub_report
+from mobi2epub.epub_tools import process_epub_features
 
-def _finalize_job(dst_str):
+def _finalize_job(dst_str, opts_str):
     dst = Path(dst_str)
+    opts = json.loads(opts_str)
+    rep = process_epub_features(
+        dst,
+        options=opts,
+        include_preview=False,
+    )
     val = validate_epub(dst)
     if not val.is_valid:
         return json.dumps({
             "valid": False,
             "error_message": f"Output EPUB validation failed: {val.error_summary}",
         })
-    rep = build_full_epub_report(dst, include_preview=True)
     rep["valid"] = True
     return json.dumps(rep)
 
-_finalize_job(_job_dst)
+_finalize_job(_job_dst, _job_opts_json)
 `);
 
     const report = JSON.parse(reportJson);
@@ -481,12 +534,13 @@ _finalize_job(_job_dst)
       return;
     }
 
-    const epubUint8 = py.FS.readFile(dstPath);
-    const outBuffer = epubUint8.buffer.slice(
-      epubUint8.byteOffset,
-      epubUint8.byteOffset + epubUint8.byteLength
-    );
-    const outBytesView = new Uint8Array(outBuffer);
+    // Optional Feature #13: OffscreenCanvas image optimization
+    if (imageOptimize && imageOptimize.enabled) {
+      await optimizeEpubImagesInWorker(py, dstPath, imageOptimize);
+    }
+
+    const outBytesView = readAndUnlinkFsFile(py, dstPath);
+    const outBuffer = outBytesView.buffer;
 
     const baseRel = (relPath || fileName || "book.mobi").replace(/\.[^/.]+$/, "");
     const outRelPath = `${baseRel}.epub`;
@@ -516,8 +570,8 @@ _finalize_job(_job_dst)
         spineCount: report.spineCount || 0,
         healthReport: report.healthReport,
         toc: report.toc || [],
-        chaptersPreview: report.chaptersPreview || [],
-        chapters: report.chaptersPreview || [],
+        chaptersPreview: [],
+        chapters: [],
         epubBytes: outBytesView,
         epubData: outBuffer,
         errorType: null,
@@ -539,15 +593,7 @@ _finalize_job(_job_dst)
       title: null,
     });
   } finally {
-    try {
-      py.globals.set("_cleanup_dir", workDir);
-      await py.runPythonAsync(`
-import shutil
-shutil.rmtree(_cleanup_dir, ignore_errors=True)
-`);
-    } catch (_) {
-      // Ignore cleanup errors
-    }
+    await cleanupWorkerJob(py, workDir, ["_job_src", "_job_dst", "_job_opts_json"]);
   }
 }
 
@@ -574,6 +620,10 @@ async function handleUpdateEpub(msg) {
       throw new Error("No EPUB bytes provided to update_epub");
     }
     py.FS.writeFile(epubPath, inputBytes);
+    msg.epubBytes = null;
+    msg.epubData = null;
+    msg.bytes = null;
+    msg.data = null;
 
     const coverFsInfo = prepareCoverOverrideInFs(py, workDir, coverOverride);
 
@@ -603,7 +653,7 @@ def _apply_updates(epub_str, opts_str):
     if cover_info:
         if cover_info.get("diskPath"):
             cover_ov = {
-                "bytes": Path(cover_info["diskPath"]).read_bytes(),
+                "diskPath": cover_info["diskPath"],
                 "mime": cover_info.get("mime") or "image/jpeg",
             }
         elif cover_info.get("dataUrl"):
@@ -627,16 +677,12 @@ _apply_updates(_upd_epub, _upd_opts_json)
     const reportJson = await py.runPythonAsync(`
 import json
 from mobi2epub.epub_tools import build_full_epub_report
-json.dumps(build_full_epub_report(_upd_epub, include_preview=True))
+json.dumps(build_full_epub_report(_upd_epub, include_preview=False))
 `);
     const report = JSON.parse(reportJson);
 
-    const epubUint8 = py.FS.readFile(epubPath);
-    const outBuffer = epubUint8.buffer.slice(
-      epubUint8.byteOffset,
-      epubUint8.byteOffset + epubUint8.byteLength
-    );
-    const outBytesView = new Uint8Array(outBuffer);
+    const outBytesView = readAndUnlinkFsFile(py, epubPath);
+    const outBuffer = outBytesView.buffer;
 
     self.postMessage(
       {
@@ -656,8 +702,8 @@ json.dumps(build_full_epub_report(_upd_epub, include_preview=True))
         coverDataUrl: report.coverDataUrl || null,
         healthReport: report.healthReport,
         toc: report.toc || [],
-        chaptersPreview: report.chaptersPreview || [],
-        chapters: report.chaptersPreview || [],
+        chaptersPreview: null,
+        chapters: null,
         errorType: null,
         errorMessage: null,
       },
@@ -673,15 +719,7 @@ json.dumps(build_full_epub_report(_upd_epub, include_preview=True))
       errorMessage: err && err.message ? err.message : String(err),
     });
   } finally {
-    try {
-      py.globals.set("_cleanup_upd_dir", workDir);
-      await py.runPythonAsync(`
-import shutil
-shutil.rmtree(_cleanup_upd_dir, ignore_errors=True)
-`);
-    } catch (_) {
-      // Ignore cleanup errors
-    }
+    await cleanupWorkerJob(py, workDir, ["_upd_epub", "_upd_opts_json"]);
   }
 }
 
@@ -700,13 +738,26 @@ async function handleReadEpub(msg) {
     if (!inputBytes) {
       throw new Error("No EPUB bytes provided to read_epub");
     }
+    const inputByteLen = inputBytes.byteLength;
     py.FS.writeFile(epubPath, inputBytes);
+    msg.epubBytes = null;
+    msg.epubData = null;
+    msg.bytes = null;
+    msg.data = null;
 
     py.globals.set("_read_epub_path", epubPath);
     const reportJson = await py.runPythonAsync(`
 import json
-from mobi2epub.epub_tools import build_full_epub_report
-json.dumps(build_full_epub_report(_read_epub_path, include_preview=True))
+import os
+from mobi2epub.epub_tools import read_epub_preview
+
+_rep = read_epub_preview(_read_epub_path)
+_rep.pop("chapters", None)
+try:
+    os.remove(_read_epub_path)
+except OSError:
+    pass
+json.dumps(_rep)
 `);
     const report = JSON.parse(reportJson);
 
@@ -721,7 +772,7 @@ json.dumps(build_full_epub_report(_read_epub_path, include_preview=True))
       publisher: report.publisher || "",
       description: report.description || "",
       coverDataUrl: report.coverDataUrl || null,
-      epubSize: report.epubSize || inputBytes.byteLength,
+      epubSize: report.epubSize || inputByteLen,
       healthReport: report.healthReport,
       toc: report.toc || [],
       chapters: report.chaptersPreview || [],
@@ -739,15 +790,7 @@ json.dumps(build_full_epub_report(_read_epub_path, include_preview=True))
       errorMessage: err && err.message ? err.message : String(err),
     });
   } finally {
-    try {
-      py.globals.set("_cleanup_read_dir", workDir);
-      await py.runPythonAsync(`
-import shutil
-shutil.rmtree(_cleanup_read_dir, ignore_errors=True)
-`);
-    } catch (_) {
-      // Ignore cleanup errors
-    }
+    await cleanupWorkerJob(py, workDir, ["_read_epub_path", "_rep"]);
   }
 }
 
@@ -768,14 +811,25 @@ async function handleExtractInputZip(msg) {
       throw new Error("No ZIP bytes provided to extract_input_zip");
     }
     py.FS.writeFile(zipPath, zipBytes);
+    msg.zipBytes = null;
+    msg.zipData = null;
+    msg.bytes = null;
+    msg.data = null;
 
     py.globals.set("_inzip_path", zipPath);
     py.globals.set("_inzip_out", outDir);
 
     const extractedJson = await py.runPythonAsync(`
 import json
+import os
 from mobi2epub.epub_tools import extract_mobi_from_zip
-json.dumps(extract_mobi_from_zip(_inzip_path, _inzip_out))
+
+_extracted_items = extract_mobi_from_zip(_inzip_path, _inzip_out)
+try:
+    os.remove(_inzip_path)
+except OSError:
+    pass
+json.dumps(_extracted_items)
 `);
 
     const items = JSON.parse(extractedJson || "[]");
@@ -783,17 +837,14 @@ json.dumps(extract_mobi_from_zip(_inzip_path, _inzip_out))
     const transfers = [];
 
     for (const item of items) {
-      const fileUint8 = py.FS.readFile(item.diskPath);
-      const buf = fileUint8.buffer.slice(
-        fileUint8.byteOffset,
-        fileUint8.byteOffset + fileUint8.byteLength
-      );
+      const fileUint8 = readAndUnlinkFsFile(py, item.diskPath);
+      const buf = fileUint8.buffer;
       transfers.push(buf);
       filesOut.push({
         fileName: item.fileName,
         name: item.fileName,
         relPath: item.relPath,
-        bytes: new Uint8Array(buf),
+        bytes: fileUint8,
         data: buf,
         size: buf.byteLength,
       });
@@ -822,15 +873,7 @@ json.dumps(extract_mobi_from_zip(_inzip_path, _inzip_out))
       errorMessage: err && err.message ? err.message : String(err),
     });
   } finally {
-    try {
-      py.globals.set("_cleanup_inzip_dir", workDir);
-      await py.runPythonAsync(`
-import shutil
-shutil.rmtree(_cleanup_inzip_dir, ignore_errors=True)
-`);
-    } catch (_) {
-      // Ignore cleanup errors
-    }
+    await cleanupWorkerJob(py, workDir, ["_inzip_path", "_inzip_out", "_extracted_items"]);
   }
 }
 
@@ -849,6 +892,10 @@ async function handleCreateZip(msg) {
       const rawBytes = toUint8Array(item.bytes || item.data || item.epubBytes || item.epubData);
       if (!rawBytes) continue;
       py.FS.writeFile(tempItemPath, rawBytes);
+      item.bytes = null;
+      item.data = null;
+      item.epubBytes = null;
+      item.epubData = null;
       manifest.push({
         diskPath: tempItemPath,
         arcName: item.arcName || item.relPath || item.name || item.fileName || `book_${i + 1}.epub`,
@@ -860,11 +907,12 @@ async function handleCreateZip(msg) {
 
     await py.runPythonAsync(`
 import json
+import os
 import zipfile
 
 items = json.loads(_zip_manifest_json)
 used_names = set()
-with zipfile.ZipFile(_zip_out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+with zipfile.ZipFile(_zip_out_path, "w", compression=zipfile.ZIP_STORED) as zf:
     for item in items:
         arc = item["arcName"].lstrip("/\\\\")
         base_arc = arc
@@ -878,14 +926,14 @@ with zipfile.ZipFile(_zip_out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf
             counter += 1
         used_names.add(arc)
         zf.write(item["diskPath"], arc)
+        try:
+            os.remove(item["diskPath"])
+        except OSError:
+            pass
 `);
 
-    const zipUint8 = py.FS.readFile(zipOutPath);
-    const zipBuffer = zipUint8.buffer.slice(
-      zipUint8.byteOffset,
-      zipUint8.byteOffset + zipUint8.byteLength
-    );
-    const zipBytesView = new Uint8Array(zipBuffer);
+    const zipBytesView = readAndUnlinkFsFile(py, zipOutPath);
+    const zipBuffer = zipBytesView.buffer;
 
     self.postMessage(
       {
@@ -907,15 +955,7 @@ with zipfile.ZipFile(_zip_out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf
       errorMessage: err && err.message ? err.message : String(err),
     });
   } finally {
-    try {
-      py.globals.set("_cleanup_zip_dir", zipWorkDir);
-      await py.runPythonAsync(`
-import shutil
-shutil.rmtree(_cleanup_zip_dir, ignore_errors=True)
-`);
-    } catch (_) {
-      // Ignore cleanup errors
-    }
+    await cleanupWorkerJob(py, zipWorkDir, ["_zip_manifest_json", "_zip_out_path"]);
   }
 }
 

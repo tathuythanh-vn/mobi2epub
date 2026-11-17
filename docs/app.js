@@ -25,6 +25,10 @@ const SUPPORTED_ALL_EXTENSIONS = [".mobi", ".prc", ".azw3", ".azw", ".zip"];
 const HISTORY_DB_NAME = "mobi2epub_history";
 const HISTORY_STORE_NAME = "books";
 const HISTORY_MAX_ITEMS = 20;
+const HISTORY_MAX_ITEM_BYTES = 20 * 1024 * 1024; // 20 MB cap for IndexedDB history items
+const LARGE_EPUB_BLOB_OFFLOAD_BYTES = 8 * 1024 * 1024; // Offload >8 MB EPUB buffers from V8 heap to Blob
+const LARGE_INPUT_SINGLE_WORKER_BYTES = 15 * 1024 * 1024; // >15 MB single file caps worker pool to 1
+const LARGE_BATCH_SINGLE_WORKER_BYTES = 50 * 1024 * 1024; // >50 MB batch caps worker pool to 1
 
 // ---------------------------------------------------------------------------
 // #17 Multi-Language UI Dictionary (EN | VI)
@@ -527,7 +531,56 @@ function toArrayBuffer(data) {
   if (!data) return new ArrayBuffer(0);
   if (data instanceof ArrayBuffer) return data;
   if (ArrayBuffer.isView(data)) {
+    if (data.byteOffset === 0 && data.byteLength === data.buffer.byteLength) {
+      return data.buffer;
+    }
     return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  }
+  return new ArrayBuffer(0);
+}
+
+function getItemEpubBlob(task) {
+  if (!task) return new Blob([], { type: "application/epub+zip" });
+  if (task.epubBlob instanceof Blob) return task.epubBlob;
+  if (task.blob instanceof Blob) return task.blob;
+  const raw = task.epubBytes || task.buffer;
+  if (raw) {
+    const blob = new Blob([raw], { type: "application/epub+zip" });
+    task.epubBlob = blob;
+    return blob;
+  }
+  return new Blob([], { type: "application/epub+zip" });
+}
+
+async function getTaskEpubBytes(task) {
+  if (!task) return new Uint8Array(0);
+  if (task.epubBytes instanceof Uint8Array && task.epubBytes.byteLength > 0) {
+    return task.epubBytes;
+  }
+  if (task.buffer instanceof ArrayBuffer && task.buffer.byteLength > 0) {
+    return new Uint8Array(task.buffer);
+  }
+  const blob = task.epubBlob || task.blob;
+  if (blob instanceof Blob) {
+    return new Uint8Array(await blob.arrayBuffer());
+  }
+  return new Uint8Array(0);
+}
+
+async function getTaskEpubBufferCopy(task) {
+  if (!task) return new ArrayBuffer(0);
+  if (task.buffer instanceof ArrayBuffer && task.buffer.byteLength > 0) {
+    return task.buffer.slice(0);
+  }
+  if (task.epubBytes instanceof Uint8Array && task.epubBytes.byteLength > 0) {
+    return task.epubBytes.buffer.slice(
+      task.epubBytes.byteOffset,
+      task.epubBytes.byteOffset + task.epubBytes.byteLength
+    );
+  }
+  const blob = task.epubBlob || task.blob;
+  if (blob instanceof Blob) {
+    return await blob.arrayBuffer();
   }
   return new ArrayBuffer(0);
 }
@@ -612,6 +665,7 @@ class WorkerPool {
       worker,
       ready: false,
       busy: false,
+      dead: false,
       pending: new Map(),
       readyPromise: null,
       resolveReady: null,
@@ -628,7 +682,7 @@ class WorkerPool {
       if (!msg || !msg.type) return;
 
       if (msg.type === "init_status") {
-        if (index === 0 && !state.engineReady) {
+        if ((index === 0 || this.slots[0] === slot) && !state.engineReady) {
           els.enginePill.className = "engine-pill loading";
           els.engineStatusText.textContent = msg.message || t("engineLoading");
         }
@@ -638,16 +692,19 @@ class WorkerPool {
       if (msg.type === "ready") {
         slot.ready = true;
         slot.resolveReady(slot);
-        if (index === 0) {
+        if (index === 0 || !state.engineReady) {
+          const wasNotReady = !state.engineReady;
           state.engineReady = true;
           state.engineError = null;
           state.engineName = msg.engine || "KindleUnpack WASM";
           els.enginePill.className = "engine-pill ready";
           els.engineStatusText.textContent = t("engineReady", { engine: state.engineName });
-          appendLog(
-            "[INFO] Pyodide WebAssembly engine initialized (mobi2epub + KindleUnpack ready).",
-            "info"
-          );
+          if (wasNotReady) {
+            appendLog(
+              "[INFO] Pyodide WebAssembly engine initialized (mobi2epub + KindleUnpack ready).",
+              "info"
+            );
+          }
           updateControlsState();
 
           if (state.autoConvertOnReady && state.queuedFiles.length > 0 && !state.isRunning) {
@@ -661,8 +718,13 @@ class WorkerPool {
 
       if (msg.type === "init_error") {
         const errMsg = msg.message || "Failed to initialize Pyodide";
+        slot.dead = true;
         slot.rejectReady(new Error(errMsg));
-        if (index === 0) {
+        const slotIdx = this.slots.indexOf(slot);
+        if (slotIdx !== -1) {
+          this.slots.splice(slotIdx, 1);
+        }
+        if (index === 0 && !state.engineReady) {
           state.engineReady = false;
           state.engineError = errMsg;
           els.enginePill.className = "engine-pill error";
@@ -670,26 +732,75 @@ class WorkerPool {
           appendLog(`[ERROR] Failed to load WebAssembly Python engine: ${errMsg}`, "fail");
           updateControlsState();
         }
+        updateWorkerPoolBadge();
         return;
       }
 
       // Resolve any RPC call matching msg.id
       if (msg.id !== undefined && slot.pending.has(msg.id)) {
-        const resolver = slot.pending.get(msg.id);
+        const entry = slot.pending.get(msg.id);
         slot.pending.delete(msg.id);
         slot.busy = slot.pending.size > 0;
-        resolver(msg);
+        if (typeof entry === "function") {
+          entry(msg);
+        } else if (entry && typeof entry.resolve === "function") {
+          entry.resolve(msg);
+        }
       }
     };
 
-    worker.onerror = (err) => {
-      const message = err && err.message ? err.message : "Worker runtime error";
-      if (index === 0) {
+    const handleWorkerCrash = (err) => {
+      if (err && typeof err.preventDefault === "function") {
+        err.preventDefault();
+      }
+      const message =
+        err && err.message ? err.message : "Worker crashed (out of memory)";
+      const crashError = new Error(message);
+
+      slot.dead = true;
+      slot.ready = false;
+      slot.busy = false;
+
+      if (slot.rejectReady) {
+        slot.rejectReady(crashError);
+      }
+
+      if (slot.pending.size > 0) {
+        const pendingList = Array.from(slot.pending.values());
+        slot.pending.clear();
+        for (const entry of pendingList) {
+          try {
+            if (entry && typeof entry.reject === "function") {
+              entry.reject(crashError);
+            }
+          } catch (_) {
+            // Ignore secondary reject error
+          }
+        }
+      }
+
+      try {
+        worker.terminate();
+      } catch (_) {
+        // Ignore terminate error
+      }
+
+      const slotIdx = this.slots.indexOf(slot);
+      if (slotIdx !== -1) {
+        this.slots.splice(slotIdx, 1);
+      }
+
+      if (!state.engineReady && this.slots.length === 0) {
         els.enginePill.className = "engine-pill error";
         els.engineStatusText.textContent = t("engineError");
       }
+
+      updateWorkerPoolBadge();
       appendLog(`[ERROR] Worker #${index + 1} error: ${message}`, "fail");
     };
+
+    worker.onerror = handleWorkerCrash;
+    worker.onmessageerror = handleWorkerCrash;
 
     worker.postMessage({ type: "init" });
     this.slots.push(slot);
@@ -698,6 +809,7 @@ class WorkerPool {
   }
 
   initPrimary() {
+    this.slots = this.slots.filter((s) => !s.dead);
     if (this.slots.length === 0) {
       this.createSlot(0);
     }
@@ -705,7 +817,20 @@ class WorkerPool {
   }
 
   async scaleTo(desiredCount) {
+    this.slots = this.slots.filter((s) => !s.dead);
     const target = Math.max(1, Math.min(desiredCount, this.maxConcurrency));
+
+    // Terminate excess idle workers when scaling down for a memory-heavy batch
+    while (this.slots.length > target) {
+      const candidate = this.slots[this.slots.length - 1];
+      if (candidate.busy || candidate.pending.size > 0) break;
+      candidate.dead = true;
+      try {
+        candidate.worker.terminate();
+      } catch (_) {}
+      this.slots.pop();
+    }
+
     while (this.slots.length < target) {
       this.createSlot(this.slots.length);
     }
@@ -716,16 +841,29 @@ class WorkerPool {
   }
 
   async callOnSlot(slot, payload, transfer = []) {
+    if (!slot || slot.dead) {
+      slot = this.initPrimary();
+    }
     await slot.readyPromise;
-    return new Promise((resolve) => {
+    if (slot.dead) {
+      throw new Error("Worker crashed before task could start");
+    }
+    return new Promise((resolve, reject) => {
       const id = state.nextJobId++;
       slot.busy = true;
-      slot.pending.set(id, resolve);
-      slot.worker.postMessage({ ...payload, id }, transfer);
+      slot.pending.set(id, { resolve, reject });
+      try {
+        slot.worker.postMessage({ ...payload, id }, transfer);
+      } catch (postErr) {
+        slot.pending.delete(id);
+        slot.busy = slot.pending.size > 0;
+        reject(postErr);
+      }
     });
   }
 
   async callAny(payload, transfer = []) {
+    this.slots = this.slots.filter((s) => !s.dead);
     if (this.slots.length === 0) {
       this.initPrimary();
     }
@@ -766,10 +904,26 @@ function openHistoryDb() {
   });
 }
 
-async function saveItemToHistoryDb(item) {
+async function saveItemToHistoryDb(item, { skipReload = false } = {}) {
   try {
+    const epubSize =
+      item.epubSize ||
+      item.size ||
+      (item.epubBlob ? item.epubBlob.size : 0) ||
+      (item.buffer ? item.buffer.byteLength : 0);
+
+    // Skip storing >20 MB items in IndexedDB to prevent mid-batch memory spikes
+    if (epubSize > HISTORY_MAX_ITEM_BYTES) {
+      return;
+    }
+
     const db = await openHistoryDb();
     if (!db) return;
+
+    const epubBufferCopy = await getTaskEpubBufferCopy(item);
+    if (!epubBufferCopy || epubBufferCopy.byteLength > HISTORY_MAX_ITEM_BYTES) {
+      return;
+    }
 
     const record = {
       id: item.historyId || `${item.outRelPath}::${Date.now()}`,
@@ -783,10 +937,10 @@ async function saveItemToHistoryDb(item) {
       description: item.description,
       coverDataUrl: item.coverDataUrl,
       originalSize: item.originalSize,
-      epubSize: item.epubSize,
+      epubSize: item.epubSize || epubBufferCopy.byteLength,
       healthReport: item.healthReport,
       toc: item.toc,
-      epubBytes: item.buffer.slice(0),
+      epubBytes: epubBufferCopy,
     };
     item.historyId = record.id;
 
@@ -798,9 +952,11 @@ async function saveItemToHistoryDb(item) {
       tx.onerror = () => resolve();
     });
 
-    // Enforce HISTORY_MAX_ITEMS cap
+    // Enforce HISTORY_MAX_ITEMS cap without reading full blobs into memory
     await pruneHistoryDb(db);
-    await loadHistoryFromDb();
+    if (!skipReload) {
+      await loadHistoryFromDb();
+    }
   } catch (_) {
     // Ignore quota or private-browsing IndexedDB restrictions
   }
@@ -810,6 +966,26 @@ async function pruneHistoryDb(db) {
   return new Promise((resolve) => {
     const tx = db.transaction(HISTORY_STORE_NAME, "readwrite");
     const store = tx.objectStore(HISTORY_STORE_NAME);
+    if (store.indexNames && store.indexNames.contains("timestamp")) {
+      const idx = store.index("timestamp");
+      if (typeof idx.getAllKeys === "function") {
+        const req = idx.getAllKeys();
+        req.onsuccess = () => {
+          const keys = req.result || [];
+          // Index keys are ordered ascending by timestamp (oldest first)
+          if (keys.length > HISTORY_MAX_ITEMS) {
+            const toDelete = keys.slice(0, keys.length - HISTORY_MAX_ITEMS);
+            for (const oldKey of toDelete) {
+              store.delete(oldKey);
+            }
+          }
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+        return;
+      }
+    }
+
     const req = store.getAll();
     req.onsuccess = () => {
       const all = req.result || [];
@@ -847,14 +1023,17 @@ async function loadHistoryFromDb() {
     records.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
     state.historyItems = records.map((rec) => {
       const buffer = toArrayBuffer(rec.epubBytes);
-      const blob = new Blob([buffer], { type: "application/epub+zip" });
-      const blobUrl = URL.createObjectURL(blob);
+      const epubBlob = new Blob([buffer], { type: "application/epub+zip" });
+      const blobUrl = URL.createObjectURL(epubBlob);
+      const isLarge = buffer.byteLength > LARGE_EPUB_BLOB_OFFLOAD_BYTES;
       return {
         ...rec,
         historyId: rec.id,
         size: buffer.byteLength,
         epubSize: rec.epubSize || buffer.byteLength,
-        buffer,
+        epubBlob,
+        buffer: isLarge ? null : buffer,
+        epubBytes: isLarge ? null : new Uint8Array(buffer),
         blobUrl,
       };
     });
@@ -1349,6 +1528,7 @@ function getCurrentConversionOptions(item) {
 function normalizeWorkerConversionResult(res, item, template, usedRelPaths) {
   const rawBytes = res.epubBytes || res.epubData;
   const epubBuffer = toArrayBuffer(rawBytes);
+  const epubBlob = new Blob([epubBuffer], { type: "application/epub+zip" });
   const title =
     res.title ||
     item.metadataOverride?.title ||
@@ -1393,14 +1573,16 @@ function normalizeWorkerConversionResult(res, item, template, usedRelPaths) {
       }))
     : [];
 
-  const chaptersPreview = Array.isArray(res.chaptersPreview || res.chapters)
-    ? (res.chaptersPreview || res.chapters).map((ch, idx) => ({
-        id: ch.id || `ch_${idx + 1}`,
-        title: ch.title || ch.label || `Section ${idx + 1}`,
-        href: ch.href || "",
-        html: ch.html || "",
-      }))
-    : null;
+  const rawChapters = res.chaptersPreview || res.chapters;
+  const chaptersPreview =
+    Array.isArray(rawChapters) && rawChapters.length > 0
+      ? rawChapters.map((ch, idx) => ({
+          id: ch.id || `ch_${idx + 1}`,
+          title: ch.title || ch.label || `Section ${idx + 1}`,
+          href: ch.href || "",
+          html: ch.html || "",
+        }))
+      : null;
 
   return {
     outFileName,
@@ -1419,7 +1601,9 @@ function normalizeWorkerConversionResult(res, item, template, usedRelPaths) {
     healthReport,
     toc,
     chaptersPreview,
+    epubBlob,
     buffer: epubBuffer,
+    epubBytes: new Uint8Array(epubBuffer),
   };
 }
 
@@ -1463,9 +1647,23 @@ async function startBatchConversion() {
     setProgress(0, total, false);
   }
 
-  // Scale worker pool for multi-file batches (#2)
-  const desiredWorkers =
-    total === 1 ? 1 : Math.min(navigator.hardwareConcurrency || 2, 4, total);
+  // Smart worker pool sizing (#2): cap concurrency to 1 when any input file > 15 MB
+  // or total batch size > 50 MB so multiple Pyodide WASM heaps never OOM the tab.
+  let maxInputBytes = 0;
+  let totalInputBytes = 0;
+  for (const item of tasks) {
+    const sz = item.size || (item.file ? item.file.size : 0) || 0;
+    if (sz > maxInputBytes) maxInputBytes = sz;
+    totalInputBytes += sz;
+  }
+  const isMemoryHeavyBatch =
+    maxInputBytes > LARGE_INPUT_SINGLE_WORKER_BYTES ||
+    totalInputBytes > LARGE_BATCH_SINGLE_WORKER_BYTES;
+  const maxAllowedWorkers = isMemoryHeavyBatch
+    ? 1
+    : Math.min(navigator.hardwareConcurrency || 2, 4);
+  const desiredWorkers = total === 1 ? 1 : Math.min(maxAllowedWorkers, total);
+
   appendLog(
     `Starting conversion of ${total} file(s) across ${desiredWorkers} Web Worker(s)...`,
     "info"
@@ -1489,6 +1687,26 @@ async function startBatchConversion() {
 
   const runWorkerLoop = async (slot) => {
     while (!state.cancelRequested) {
+      if (slot.dead) {
+        if (nextTaskIdx >= total || state.cancelRequested) break;
+        appendLog(
+          "[INFO] Respawning clean Web Worker after crash to continue batch...",
+          "info"
+        );
+        try {
+          slot = workerPool.createSlot(slot.index);
+          await slot.readyPromise;
+        } catch (respawnErr) {
+          appendLog(
+            `[ERROR] Could not respawn Web Worker: ${
+              respawnErr && respawnErr.message ? respawnErr.message : String(respawnErr)
+            }`,
+            "fail"
+          );
+          break;
+        }
+      }
+
       const i = nextTaskIdx++;
       if (i >= total) break;
 
@@ -1543,21 +1761,18 @@ async function startBatchConversion() {
             usedRelPaths
           );
 
-          const blob = new Blob([normalized.buffer], { type: "application/epub+zip" });
-          normalized.blobUrl = URL.createObjectURL(blob);
+          normalized.blobUrl = URL.createObjectURL(normalized.epubBlob);
 
           const prev = state.convertedItems.get(normalized.outRelPath);
           if (prev && prev.blobUrl) {
             URL.revokeObjectURL(prev.blobUrl);
           }
 
-          state.convertedItems.set(normalized.outRelPath, normalized);
-
           // Direct Save to Folder (#3)
           if (state.outputDirHandle) {
             const wrote = await writeEpubToOutputFolder(
               normalized.outRelPath,
-              normalized.buffer
+              normalized.epubBlob
             );
             if (wrote) {
               appendLog(
@@ -1567,8 +1782,17 @@ async function startBatchConversion() {
             }
           }
 
-          // Save to IndexedDB History (#4)
-          await saveItemToHistoryDb(normalized);
+          // Save to IndexedDB History (#4) — skips >20 MB items and defers full reload until batch end
+          await saveItemToHistoryDb(normalized, { skipReload: true });
+
+          // For outputs > 8 MB, offload raw ArrayBuffer/Uint8Array from V8 heap now that epubBlob is created
+          if (normalized.size > LARGE_EPUB_BLOB_OFFLOAD_BYTES) {
+            normalized.buffer = null;
+            normalized.epubBytes = null;
+            normalized.chaptersPreview = null;
+          }
+
+          state.convertedItems.set(normalized.outRelPath, normalized);
 
           const titleSuffix = normalized.title ? ` ('${normalized.title}')` : "";
           appendLog(
@@ -1599,6 +1823,12 @@ async function startBatchConversion() {
   };
 
   await Promise.all(activeSlots.map((slot) => runWorkerLoop(slot)));
+
+  if (workerPool.slots.length === 0) {
+    workerPool.initPrimary();
+  }
+
+  await loadHistoryFromDb();
 
   stopElapsedTimer();
   const elapsedSec = (performance.now() - state.startTime) / 1000;
@@ -1640,7 +1870,8 @@ function canShareEpubFile(item) {
     if (typeof navigator.share !== "function" || typeof navigator.canShare !== "function") {
       return false;
     }
-    const testFile = new File([item.buffer], item.outFileName || "book.epub", {
+    const blob = getItemEpubBlob(item);
+    const testFile = new File([blob], item.outFileName || "book.epub", {
       type: "application/epub+zip",
     });
     return navigator.canShare({ files: [testFile] });
@@ -1651,7 +1882,8 @@ function canShareEpubFile(item) {
 
 async function handleShareEpub(item) {
   try {
-    const epubFile = new File([item.buffer], item.outFileName || "book.epub", {
+    const blob = getItemEpubBlob(item);
+    const epubFile = new File([blob], item.outFileName || "book.epub", {
       type: "application/epub+zip",
     });
     await navigator.share({
@@ -1821,22 +2053,30 @@ async function handleDownloadAllZip() {
   els.btnDownloadAllZip.textContent = t("buildingZipBtn");
 
   try {
-    const filesPayload = items.map((item) => {
-      const copy = item.buffer.slice(0);
-      return {
-        name: item.outFileName,
-        fileName: item.outFileName,
-        arcName: item.outRelPath,
-        relPath: item.outRelPath,
-        data: copy,
-        bytes: copy,
-      };
-    });
+    const filesPayload = [];
+    const transfers = [];
+    for (const item of items) {
+      const copy = await getTaskEpubBufferCopy(item);
+      if (copy && copy.byteLength > 0) {
+        transfers.push(copy);
+        filesPayload.push({
+          name: item.outFileName,
+          fileName: item.outFileName,
+          arcName: item.outRelPath,
+          relPath: item.outRelPath,
+          data: copy,
+          bytes: copy,
+        });
+      }
+    }
 
-    const res = await workerPool.callAny({
-      type: "create_zip",
-      files: filesPayload,
-    });
+    const res = await workerPool.callAny(
+      {
+        type: "create_zip",
+        files: filesPayload,
+      },
+      transfers
+    );
 
     const rawZip = res.zipData || res.zipBytes;
     if ((res.ok ?? res.success) && rawZip) {
@@ -1882,8 +2122,12 @@ async function openReaderModal(item) {
   let toc = item.toc || [];
 
   if (!Array.isArray(chapters) || chapters.length === 0) {
+    els.readerChapterIndicator.textContent = "...";
+    els.readerTocList.innerHTML = "";
+    els.readerIframe.srcdoc =
+      '<!DOCTYPE html><html><body style="font-family:sans-serif;padding:2rem;color:#64748b;">Loading book preview...</body></html>';
     try {
-      const copyBuf = item.buffer.slice(0);
+      const copyBuf = await getTaskEpubBufferCopy(item);
       const res = await workerPool.callAny(
         {
           type: "read_epub",
@@ -1896,7 +2140,9 @@ async function openReaderModal(item) {
       if (Array.isArray(res.toc) && res.toc.length > 0) {
         toc = res.toc;
       }
-      item.chaptersPreview = chapters;
+      if ((item.epubSize || item.size || 0) <= LARGE_EPUB_BLOB_OFFLOAD_BYTES) {
+        item.chaptersPreview = chapters;
+      }
     } catch (err) {
       chapters = [
         {
@@ -2072,6 +2318,15 @@ function renderCurrentReaderChapter(anchorHref = "") {
 function closeReaderModal() {
   els.readerModal.classList.add("hidden");
   els.readerIframe.srcdoc = "";
+  if (
+    state.reader.item &&
+    (state.reader.item.epubSize || state.reader.item.size || 0) >
+      LARGE_EPUB_BLOB_OFFLOAD_BYTES
+  ) {
+    state.reader.item.chaptersPreview = null;
+  }
+  state.reader.chapters = [];
+  state.reader.item = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2348,7 +2603,7 @@ async function handleSaveEditModal() {
   els.btnSaveEdit.textContent = t("savingChangesBtn");
 
   try {
-    const currentBytes = item.buffer.slice(0);
+    const currentBytes = await getTaskEpubBufferCopy(item);
     const payload = {
       type: "update_epub",
       epubBytes: currentBytes,
@@ -2371,8 +2626,11 @@ async function handleSaveEditModal() {
       const newBuffer = toArrayBuffer(updatedRaw);
       if (item.blobUrl) URL.revokeObjectURL(item.blobUrl);
       const newBlob = new Blob([newBuffer], { type: "application/epub+zip" });
+      const isLarge = newBuffer.byteLength > LARGE_EPUB_BLOB_OFFLOAD_BYTES;
 
-      item.buffer = newBuffer;
+      item.epubBlob = newBlob;
+      item.buffer = isLarge ? null : newBuffer;
+      item.epubBytes = isLarge ? null : new Uint8Array(newBuffer);
       item.size = newBuffer.byteLength;
       item.epubSize = res.epubSize || newBuffer.byteLength;
       item.blobUrl = URL.createObjectURL(newBlob);
@@ -2402,8 +2660,9 @@ async function handleSaveEditModal() {
       if (res.healthReport) {
         item.healthReport = res.healthReport;
       }
-      if (res.chaptersPreview || res.chapters) {
-        item.chaptersPreview = res.chaptersPreview || res.chapters;
+      const updatedChapters = res.chaptersPreview || res.chapters;
+      if (!isLarge && Array.isArray(updatedChapters) && updatedChapters.length > 0) {
+        item.chaptersPreview = updatedChapters;
       } else {
         item.chaptersPreview = null; // Force fresh read on next preview
       }
@@ -2423,7 +2682,7 @@ async function handleSaveEditModal() {
       item.outFileName = updatedNames.outFileName;
 
       if (state.outputDirHandle) {
-        await writeEpubToOutputFolder(item.outRelPath, item.buffer);
+        await writeEpubToOutputFolder(item.outRelPath, item.epubBlob);
       }
       await saveItemToHistoryDb(item);
 
